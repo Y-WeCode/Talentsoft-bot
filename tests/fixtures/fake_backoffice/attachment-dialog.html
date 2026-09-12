@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="fr">
+<head><meta charset="utf-8"><title>TS recrutement</title></head>
+<body>
+  <h1>Pièces jointes</h1>
+  <p>Note : la taille des fichiers joints est limitée à 10240 Ko.</p>
+  <p>Note : les types de documents autorisés sont : .doc .rtf .docx .pdf .tif .tiff .xlsx .zip</p>
+
+  <!-- Une ligne PAR CATÉGORIE, chacune avec son propre champ fichier. Aucune liste déroulante,
+       et surtout : aucune indication que la catégorie contient déjà un document. -->
+  <form enctype="multipart/form-data" method="post">
+    <table>
+      <tr><td>Lettre de motivation</td><td><input type="file" id="ctl00_fieldContent_Files_ctl01_File"></td></tr>
+      <tr><td>CV</td><td><input type="file" id="ctl00_fieldContent_Files_ctl02_File"></td></tr>
+      <tr><td>Autres documents</td><td><input type="file" id="ctl00_fieldContent_Files_ctl03_File"></td></tr>
+      <tr><td>Compte rendu</td><td><input type="file" id="ctl00_fieldContent_Files_ctl04_File"></td></tr>
+    </table>
+    <input type="submit" id="ctl00_ButtonContent_ctl00_ctl01_btCancel" class="cancel-button" value="Annuler">
+    <input type="submit" id="ctl00_ButtonContent_ctl00_ctl02_btValidate" class="valid-button" value="Enregistrer">
+  </form>
+<script>
+document.getElementById('ctl00_ButtonContent_ctl00_ctl02_btValidate').addEventListener('click', function (e) {
+  e.preventDefault();
+  var inputs = Array.from(document.querySelectorAll('input[type=file]'));
+  inputs.forEach(function (i) {
+    if (!i.files || !i.files.length) return;
+    var category = i.closest('tr').cells[0].innerText.trim();
+    parent.__addAttachment(category, i.files[0].name);
+  });
+  parent.__closeModal();
+});
+document.getElementById('ctl00_ButtonContent_ctl00_ctl01_btCancel').addEventListener('click', function (e) {
+  e.preventDefault();
+  parent.__closeModal();
+});
+</script>
+</body>
+</html>

@@ -9,18 +9,38 @@ from fastapi import HTTPException
 def env(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("TS_BASE_URL", "https://tenant.talent-soft.com")
-    monkeypatch.delenv("TS_APPLICATION_URL_TEMPLATE", raising=False)
+    monkeypatch.delenv("TS_AUTH_HOSTS", raising=False)
     monkeypatch.delenv("REDIS_URL", raising=False)
     from app import idempotency
 
     idempotency.reset_memory_store()
 
 
-def test_build_application_url_uses_template(env, monkeypatch):
+def test_offer_reference_matching_is_strict(env):
+    """L'appariement d'une candidature repose sur la reference de l'offre : il doit etre strict."""
     from app import safety
 
-    monkeypatch.setenv("TS_APPLICATION_URL_TEMPLATE", "{base}/bo/apps/{application_id}?tab=events")
-    assert safety.build_application_url("A-12") == "https://tenant.talent-soft.com/bo/apps/A-12?tab=events"
+    row = "Reponse a offre Agent d'Escale Commercial F/H ( ref. 2026-25152)"
+    assert safety.offer_reference_matches(row, "25152")
+    assert not safety.offer_reference_matches(row, "23770")
+    # Un identifiant plus court ne doit pas matcher par simple inclusion.
+    assert not safety.offer_reference_matches(row, "152")
+    # Ni un identifiant prefixe d'un numero plus long.
+    assert not safety.offer_reference_matches("... ( ref. 2026-251521)", "25152")
+    assert not safety.offer_reference_matches(row, "")
+
+
+def test_auth_hosts_are_allowed_but_nothing_else(env, monkeypatch):
+    """L'allowlist d'authentification ne doit pas ouvrir la navigation au-dela."""
+    from app import safety
+
+    monkeypatch.setenv("TS_AUTH_HOSTS", "idp.talent-soft.com, fed.talent-soft.com")
+    assert safety.is_allowed_navigation("https://tenant.talent-soft.com/Pages/x.aspx")
+    assert safety.is_allowed_navigation("https://idp.talent-soft.com/wsfed/issue")
+    assert safety.is_allowed_navigation("https://fed.talent-soft.com/choose")
+    assert not safety.is_allowed_navigation("https://evil.example.com/")
+    # Le protocole reste impose.
+    assert not safety.is_allowed_navigation("http://idp.talent-soft.com/wsfed/issue")
 
 
 def test_application_id_validation(env):

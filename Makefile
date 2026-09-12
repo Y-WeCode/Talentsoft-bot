@@ -22,7 +22,7 @@ help:
 	@echo ""
 	@echo "Vérifs"
 	@echo "  make health          GET / sur $(BASE)"
-	@echo "  make selftest        POST /selftest (login + fiche témoin + sélecteurs critiques)"
+	@echo "  make selftest        POST /selftest (login + candidature témoin + sélecteurs critiques)"
 	@echo "  make verify-code     Même version de code dans api ET worker (piège image stale)"
 	@echo "  make logs / logs-worker / traces / shell-api"
 	@echo ""
@@ -32,7 +32,7 @@ help:
 	@echo "  make discover URL=https://<tenant>.talent-soft.com/... Capture headless (login + dump DOM)"
 	@echo ""
 	@echo "API de test (token lu depuis .env, jamais affiché)"
-	@echo "  make event ID=<application_id> TYPE='Commentaire' COMMENT='Test Hippolyte.ai' [DOC=fichier.pdf]"
+	@echo "  make event EMAIL=<email> OFFER=<offer_id> COMMENT='Test Hippolyte.ai' [TYPE='...'] [DOC=fichier.pdf]"
 	@echo "  make job ID=<job_id>"
 	@echo "  make reset-session   Sortie de l'état dégradé"
 
@@ -95,15 +95,19 @@ reset-session:
 	@TOKEN=$$(grep '^API_TOKEN=' .env | cut -d= -f2- | sed 's/^["'\'']//;s/["'\'']$$//') ; \
 	curl -sS -X POST "$(BASE)/admin/reset-session" -H "Authorization: Bearer $$TOKEN" ; echo
 
-# make event ID=123 TYPE='Commentaire' COMMENT='Test' [DOC=synthese.pdf]
+# make event EMAIL=candidat@x.fr OFFER=25152 COMMENT='Test' [TYPE='...'] [DOC=synthese.pdf]
 event:
-ifndef ID
-	$(error Usage: make event ID=<application_id> COMMENT='...' [TYPE='Commentaire'] [DOC=fichier.pdf])
+ifndef EMAIL
+	$(error Usage: make event EMAIL=<email> OFFER=<offer_id> COMMENT='...' [TYPE='...'] [DOC=fichier.pdf])
+endif
+ifndef OFFER
+	$(error Usage: make event EMAIL=<email> OFFER=<offer_id> COMMENT='...' [TYPE='...'] [DOC=fichier.pdf])
 endif
 	@TOKEN=$$(grep '^API_TOKEN=' .env | cut -d= -f2- | sed 's/^["'\'']//;s/["'\'']$$//') ; \
 	curl -sS -X POST "$(BASE)/update-application" \
 	  -H "Authorization: Bearer $$TOKEN" \
-	  -F "application_id=$(ID)" \
+	  -F "candidate_email=$(EMAIL)" \
+	  -F "offer_id=$(OFFER)" \
 	  $(if $(TYPE),-F "event_type=$(TYPE)",) \
 	  $(if $(COMMENT),-F "comment=$(COMMENT)",) \
 	  $(if $(DOC),-F "documents=@$(DOC)",) ; echo

@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="fr">
+<head><meta charset="utf-8"><title>TS recrutement</title></head>
+<body class="theme-2017">
+<div id="TSBody" class="ts-page">
+
+  <input id="mui-31537" class="ds-hrecruiting-ts290" type="text"
+         placeholder="Rechercher un candidat, une offre ou une DAR">
+
+  <!-- Onglets Telerik : l'onglet actif porte rtsSelected. -->
+  <table id="navigation" class="tabback TabbackApplicant"><tr><td>
+    <ul class="rtsUL">
+      <li class="rtsLI rtsFirst"><a class="rtsLink" href="/Pages/Applicants/MainPage.aspx?tab=CardTab">Fiche</a></li>
+      <li class="rtsLI"><a class="rtsLink rtsBefore" href="/Pages/Applicants/MainPage.aspx?tab=ResumeTab">Documents</a></li>
+      <li class="rtsLI"><a class="rtsLink rtsSelected" href="/Pages/Applicants/MainPage.aspx?tab=HistoryTab">Historique</a></li>
+      <li class="rtsLI"><a class="rtsLink rtsAfter" href="/Pages/Applicants/MainPage.aspx?tab=AppreciationTab">Appréciations</a></li>
+    </ul>
+  </td></tr></table>
+
+  <!-- Historique des candidatures : deux candidatures, la référence est dans le texte du lien. -->
+  <table class="result-grid-view events-history-table ts-table-layout-auto">
+    <tr class="ch_title"><td></td><td></td><td>Événement</td><td>Date Évén</td><td>Score</td><td>Note</td><td>Statut</td><td>Suivi par</td></tr>
+
+    <tr class="ch_content_outerrep" data-offer="23770">
+      <td></td><td></td>
+      <td><a id="ctl00_rep_ctl01_lnkEventName" href="javascript:void(0)">Réponse à offre</a>
+          <a id="ctl00_rep_ctl01_lnkOfferLabel" href="javascript:void(0)">Peintre aéronautique F/H ( réf. 2026-23770)</a></td>
+      <td>12/09/2026</td><td>-</td><td>-</td><td>A traiter</td><td>Recruteur Test</td>
+    </tr>
+
+    <tr class="ch_content_outerrep" data-offer="25152">
+      <td></td><td></td>
+      <td><a id="ctl00_rep_ctl03_lnkEventName" href="javascript:void(0)">Réponse à offre</a>
+          <a id="ctl00_rep_ctl03_lnkOfferLabel" href="javascript:void(0)">Agent d'Escale Commercial F/H ( réf. 2026-25152)</a></td>
+      <td>12/09/2026</td><td>-</td><td>-</td><td>Réactivée</td><td>Recruteur Test</td>
+    </tr>
+  </table>
+
+  <!-- Panneau Outils : les actions de workflow ouvrent le formulaire d'événement. -->
+  <div id="RecruiterTools">
+    <table id="ctl00_frmApplicantActions_SubformTable"><tr><td>Actions</td></tr></table>
+    <a id="ctl00_repJobAppAction_ctl41_lblJobAppActionName" href="javascript:void(0)"
+       onclick="return confirm('Êtes-vous sûr de vouloir exécuter l\'action &quot;Candidature à l\'étude&quot; ?')">Candidature à l'étude</a>
+    <a id="ctl00_repJobAppAction_ctl42_lblJobAppActionName" href="javascript:void(0)"
+       onclick="return confirm('Êtes-vous sûr ?')">Entretien avis favorable</a>
+
+    <!-- Pièces jointes de la fiche : « NOM (Catégorie) », colonne d'origine FO/BO. -->
+    <table class="subformWithoutBorder ts-table ts-content-table" id="attachedFilesList">
+      <tr>
+        <td class="attachedFileTitle"><span id="ctl00_repAttachedFiles_ctl00_lblAttachedFile">CV CANDIDAT (CV)</span></td>
+        <td></td><td class="textAlignCenter"></td><td>FO</td>
+        <td><a id="ctl00_repAttachedFiles_ctl00_btnDeleteAttachedFileNew" href="javascript:void(0)">x</a></td>
+      </tr>
+    </table>
+    <input type="button" id="ctl00_AttachedFile_frmAttachedFiles_subformContent_btnAddFile"
+           class="search-button" value="Ajouter/Modifier">
+  </div>
+</div>
+
+<script>
+// --- Simulation des comportements observés sur le tenant -------------------------------
+// Les événements appartiennent à la candidature développée : ils sont insérés juste après
+// sa ligne, comme dans le Back Office réel.
+var EVENTS = {
+  '23770': [],
+  '25152': [{type: 'Candidature réactivée', date: '12/09/2026', by: 'Recruteur Test'}]
+};
+var selectedOffer = null;
+
+function renderEvents() {
+  var table = document.querySelector('table.events-history-table');
+  Array.from(table.querySelectorAll('tr.trChildrenEvent')).forEach(function (r) { r.remove(); });
+  if (!selectedOffer) return;
+  var parent = table.querySelector('tr.ch_content_outerrep[data-offer="' + selectedOffer + '"]');
+  if (!parent) return;
+  var after = parent;
+  EVENTS[selectedOffer].forEach(function (ev, i) {
+    var tr = document.createElement('tr');
+    tr.className = 'trChildrenEvent';
+    tr.innerHTML = '<td class="first-border"></td><td></td>' +
+      '<td><a id="ev' + i + '_lnkEventTitle" href="javascript:void(0)">' + ev.type + '</a></td>' +
+      '<td>' + ev.date + '</td><td></td><td>' + ev.by + '</td><td></td><td class="last-border"></td>';
+    after.insertAdjacentElement('afterend', tr);
+    after = tr;
+  });
+}
+
+// Sélection d'une candidature : postback simulé, avec latence.
+document.querySelectorAll('a[id$="lnkOfferLabel"]').forEach(function (link) {
+  link.addEventListener('click', function () {
+    var row = link.closest('tr');
+    selectedOffer = row.getAttribute('data-offer');
+    setTimeout(renderEvents, 60);
+  });
+});
+
+// Actions de workflow : confirm() natif, puis modale en iframe.
+document.querySelectorAll('a[id*="lblJobAppActionName"]').forEach(function (link) {
+  link.addEventListener('click', function () {
+    // Le confirm() de l'attribut onclick s'exécute avant ce handler ; s'il a été rejeté,
+    // le navigateur n'aurait pas suivi le lien. On ouvre donc la modale ici.
+    window.__openModal('/Pages/Applicants.Events/JobApplicationChildEventEdit.aspx?rwndrnd=' + Math.random());
+  });
+});
+
+document.getElementById('ctl00_AttachedFile_frmAttachedFiles_subformContent_btnAddFile')
+  .addEventListener('click', function () {
+    window.__openModal('/Pages/Utils/AttachedFileEdit.aspx?rwndrnd=' + Math.random());
+  });
+
+// RadWindow : overlay + iframe, comme dans le Back Office.
+window.__openModal = function (src) {
+  var overlay = document.createElement('div');
+  overlay.className = 'TelerikModalOverlay';
+  var win = document.createElement('div');
+  win.className = 'RadWindow RadWindow_TsTelerik rwNormalWindow';
+  win.id = 'ctl00_WindowManager1_Singleton' + Math.floor(Math.random() * 1e13);
+  var frame = document.createElement('iframe');
+  frame.setAttribute('src', src);
+  frame.width = 784; frame.height = 474;
+  win.appendChild(frame);
+  document.body.appendChild(overlay);
+  document.body.appendChild(win);
+  window.__modal = {overlay: overlay, win: win};
+};
+
+window.__closeModal = function () {
+  if (!window.__modal) return;
+  window.__modal.overlay.remove();
+  window.__modal.win.remove();
+  window.__modal = null;
+};
+
+// Appelés par les iframes après validation.
+window.__addEvent = function (type, dateStr, comment) {
+  if (selectedOffer) EVENTS[selectedOffer].push({type: type, date: dateStr, by: 'Recruteur Test'});
+  window.__closeModal();
+  setTimeout(renderEvents, 60);
+};
+
+window.__addAttachment = function (category, filename) {
+  var table = document.getElementById('attachedFilesList');
+  // Comportement réel : un dépôt dans une catégorie occupée REMPLACE le document existant.
+  var rows = Array.from(table.querySelectorAll('span[id$="lblAttachedFile"]'));
+  var existing = rows.find(function (s) {
+    var m = (s.textContent || '').match(/\(([^)]*)\)\s*$/);
+    return m && m[1].trim().toLowerCase() === category.trim().toLowerCase();
+  });
+  var label = filename.toUpperCase() + ' (' + category + ')';
+  if (existing) { existing.textContent = label; }
+  else {
+    var tr = document.createElement('tr');
+    var n = rows.length;
+    tr.innerHTML = '<td class="attachedFileTitle"><span id="ctl00_repAttachedFiles_ctl0' + n +
+      '_lblAttachedFile">' + label + '</span></td><td></td><td class="textAlignCenter"></td><td>BO</td>' +
+      '<td><a id="ctl00_repAttachedFiles_ctl0' + n + '_btnDeleteAttachedFileNew" href="javascript:void(0)">x</a></td>';
+    table.appendChild(tr);
+  }
+  window.__closeModal();
+};
+</script>
+</body>
+</html>

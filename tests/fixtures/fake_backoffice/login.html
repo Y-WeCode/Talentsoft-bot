@@ -1,21 +1,20 @@
 <!doctype html>
-<html lang="fr"><head><meta charset="utf-8"><title>Connexion</title></head>
+<html lang="fr">
+<head><meta charset="utf-8"><title>Authentification - TalentSoft</title></head>
 <body>
-<h1>Talentsoft Recruiting (faux tenant de test)</h1>
-<form id="loginForm" action="/Account/Logon" method="post">
-  <label for="UserName">Identifiant</label>
-  <input id="UserName" name="UserName" type="text">
-  <label for="Password">Mot de passe</label>
-  <input id="Password" name="Password" type="password">
-  <div class="validation-summary-errors" id="err" style="display:none">Identifiant ou mot de passe incorrect</div>
-  <button type="submit">Se connecter</button>
-</form>
-<script>
-document.getElementById('loginForm').addEventListener('submit', function (e) {
-  e.preventDefault();
-  var ok = document.getElementById('UserName').value === 'bot@example.com' && document.getElementById('Password').value === 'secret';
-  if (ok) { document.cookie = 'ts_session=1; path=/'; window.location.href = '/Recruiting/BackOffice/Home'; }
-  else { document.getElementById('err').style.display = 'block'; }
-});
-</script>
-</body></html>
+  <!-- Formulaire de l'IdP : noms de champs relevés sur le tenant réel. -->
+  <h1>Saisissez vos informations de connexion pour accéder à Talentsoft</h1>
+  <form method="post" action="https://idp-fake.talent-soft.com/wsfed/issue">
+    <input type="hidden" name="__RequestVerificationToken" value="jeton">
+    <input type="hidden" name="ReturnUrl" id="ReturnUrl" value="/">
+    <label for="Username">Nom d'utilisateur</label>
+    <input type="text" name="Username" id="Username" class="form-control">
+    <label for="Password">Mot de passe</label>
+    <input type="password" name="Password" id="Password" class="form-control">
+    <input type="checkbox" name="RememberMe" id="RememberMe" class="form-check-input">
+    <label for="RememberMe">Maintenir la connexion</label>
+    <button type="submit" class="btn btn-primary">Connexion</button>
+  </form>
+  <div class="validation-summary-errors" style="display:none">Identifiants incorrects</div>
+</body>
+</html>

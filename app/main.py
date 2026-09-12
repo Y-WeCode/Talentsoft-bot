@@ -230,14 +230,20 @@ async def run_browser_async(job_type: str, work: Callable[[object], T]) -> T:
 
 def build_idempotency_key(
     provided: str | None,
-    application_id: str,
+    candidate_email: str,
+    offer_id: str,
     event_type: str | None,
     comment: str | None,
     document_paths: list[str],
 ) -> str:
+    """Cle derivee du contenu, a defaut d'une cle fournie.
+
+    L'email n'entre dans la cle que sous forme d'empreinte : la cle se retrouve dans Redis
+    et dans les logs, elle ne doit pas y exposer une donnee personnelle.
+    """
     if provided:
         return f"k:{safety.short_hash(provided)}"
-    parts = [application_id, event_type or "", safety.short_hash(comment or "")]
+    parts = [safety.short_hash(candidate_email), offer_id, event_type or "", safety.short_hash(comment or "")]
     parts.extend(sorted(safety.file_hash(p) for p in document_paths))
     return f"f:{safety.short_hash('|'.join(parts))}"
 
@@ -330,10 +336,8 @@ def read_root():
 
 @app.post("/update-application", summary="Événement + documents sur une candidature")
 async def update_application(
-    application_id: str = Form(None, description="Identifiant Talentsoft de la candidature"),
-    application_url: str = Form(
-        None, description="URL de la fiche (doit être sur TS_BASE_URL). Prioritaire si fournie"
-    ),
+    candidate_email: str = Form(None, description="Email du candidat (pour le retrouver dans le Back Office)"),
+    offer_id: str = Form(None, description="Identifiant de l'offre (pour choisir la bonne candidature)"),
     event_type: str = Form(None, description="Type d'événement (libellé ou code). Défaut : TS_DEFAULT_EVENT_TYPE"),
     comment: str = Form(None, description="Commentaire de l'événement. Sans commentaire, aucun événement n'est créé"),
     event_date: str = Form(None, description="Date de l'événement YYYY-MM-DD (défaut : aujourd'hui)"),
@@ -348,14 +352,15 @@ async def update_application(
     document_paths: list[str] = []
     original_names: list[str] = []
     try:
-        app_id, url = safety.resolve_application_url(application_id, application_url)
+        email = safety.validate_candidate_email(candidate_email)
+        offer = safety.validate_offer_id(offer_id)
         clean_comment = safety.sanitize_comment(comment)
         _validate_event_date(event_date)
         document_paths = await save_upload_files(documents, original_names)
         if not clean_comment and not document_paths:
             raise HTTPException(status_code=400, detail="Rien à faire : ni commentaire ni document")
 
-        key = build_idempotency_key(idempotency_key, app_id, event_type, clean_comment, document_paths)
+        key = build_idempotency_key(idempotency_key, email, offer, event_type, clean_comment, document_paths)
 
         if async_mode == 1:
             from . import jobs as jobs_mod
@@ -363,8 +368,8 @@ async def update_application(
             if not jobs_mod.is_async_jobs_enabled():
                 raise HTTPException(status_code=400, detail="Jobs asynchrones non activés (TS_ASYNC_JOBS_ENABLED)")
             job = jobs_mod.enqueue_update_application(
-                application_id=app_id,
-                application_url=url,
+                candidate_email=email,
+                offer_id=offer,
                 event_type=event_type,
                 comment=clean_comment,
                 event_date=event_date,
@@ -380,8 +385,8 @@ async def update_application(
         def work(bot):
             return _update_payload(
                 bot.update_application(
-                    application_id=app_id,
-                    application_url=url,
+                    candidate_email=email,
+                    offer_id=offer,
                     event_type=event_type,
                     comment=clean_comment,
                     event_date=event_date,
@@ -397,21 +402,22 @@ async def update_application(
         cleanup_files(document_paths)
 
 
-@app.post("/applications/{application_id}/events", summary="Créer un événement avec commentaire")
-async def create_event(application_id: str, request: models.EventRequest, token: str = Depends(verify_token)):
+@app.post("/applications/events", summary="Creer un evenement avec commentaire")
+async def create_event(request: models.EventRequest, token: str = Depends(verify_token)):
     try:
-        app_id, url = safety.resolve_application_url(application_id, None)
+        email = safety.validate_candidate_email(request.candidate_email)
+        offer = safety.validate_offer_id(request.offer_id)
         clean_comment = safety.sanitize_comment(request.comment)
         if not clean_comment:
             raise HTTPException(status_code=400, detail="Commentaire vide")
         _validate_event_date(request.event_date)
-        key = build_idempotency_key(request.idempotency_key, app_id, request.event_type, clean_comment, [])
+        key = build_idempotency_key(request.idempotency_key, email, offer, request.event_type, clean_comment, [])
 
         def work(bot):
             return _update_payload(
                 bot.update_application(
-                    application_id=app_id,
-                    application_url=url,
+                    candidate_email=email,
+                    offer_id=offer,
                     event_type=request.event_type,
                     comment=clean_comment,
                     event_date=request.event_date,
@@ -422,13 +428,14 @@ async def create_event(application_id: str, request: models.EventRequest, token:
 
         return await run_idempotent_update(job_type="create-event", key=key, work=work)
     except Exception as error:
-        raise_generic_server_error("/applications/{id}/events", error)
+        raise_generic_server_error("/applications/events", error)
 
 
-@app.post("/applications/{application_id}/documents", summary="Ajouter des pièces jointes")
+@app.post("/applications/documents", summary="Ajouter une piece jointe")
 async def add_documents(
-    application_id: str,
-    documents: list[UploadFile] = File(..., description="Pièces jointes (1..n)"),
+    candidate_email: str = Form(..., description="Email du candidat"),
+    offer_id: str = Form(..., description="Identifiant de l'offre"),
+    documents: list[UploadFile] = File(..., description="Piece jointe (une seule : une categorie = un fichier)"),
     document_category: str = Form(None),
     idempotency_key: str = Form(None),
     token: str = Depends(verify_token),
@@ -436,18 +443,19 @@ async def add_documents(
     document_paths: list[str] = []
     original_names: list[str] = []
     try:
-        app_id, url = safety.resolve_application_url(application_id, None)
+        email = safety.validate_candidate_email(candidate_email)
+        offer = safety.validate_offer_id(offer_id)
         document_paths = await save_upload_files(documents, original_names)
         if not document_paths:
             raise HTTPException(status_code=400, detail="Aucun document fourni")
-        key = build_idempotency_key(idempotency_key, app_id, None, None, document_paths)
+        key = build_idempotency_key(idempotency_key, email, offer, None, None, document_paths)
         paths_for_job = list(document_paths)
 
         def work(bot):
             return _update_payload(
                 bot.update_application(
-                    application_id=app_id,
-                    application_url=url,
+                    candidate_email=email,
+                    offer_id=offer,
                     document_paths=paths_for_job,
                     document_category=document_category,
                 )
@@ -455,72 +463,103 @@ async def add_documents(
 
         return await run_idempotent_update(job_type="add-documents", key=key, work=work)
     except Exception as error:
-        raise_generic_server_error("/applications/{id}/documents", error)
+        raise_generic_server_error("/applications/documents", error)
     finally:
         cleanup_files(document_paths)
 
 
-@app.get("/applications/{application_id}/events", summary="Lire l'historique d'une candidature (lecture seule)")
-async def list_events(application_id: str, token: str = Depends(verify_token)):
+@app.get("/applications/events", summary="Lire l'historique d'une candidature (lecture seule)")
+async def list_events(
+    candidate_email: str = Query(..., description="Email du candidat"),
+    offer_id: str = Query(..., description="Identifiant de l'offre"),
+    token: str = Depends(verify_token),
+):
     try:
-        app_id, url = safety.resolve_application_url(application_id, None)
+        email = safety.validate_candidate_email(candidate_email)
+        offer = safety.validate_offer_id(offer_id)
 
         def work(bot):
-            return {"application_id": app_id, "events": bot.list_events(url)}
+            return {"offer_id": offer, "events": bot.list_events(email, offer)}
 
         payload = await run_browser_async("list-events", work)
         return JSONResponse(content=payload, status_code=200)
     except Exception as error:
-        raise_generic_server_error("/applications/{id}/events", error)
+        raise_generic_server_error("/applications/events", error)
 
 
-_REFERENTIAL_CACHE: dict[str, tuple[float, list[str]]] = {}
+_REFERENTIAL_CACHE: dict[str, tuple[float, list]] = {}
 _REFERENTIAL_TTL_SECONDS = 3600
 
 
-async def _referential(name: str, reader: Callable[[object, str], list[str]], application_id: str | None):
+async def _referential(name: str, reader, candidate_email: str | None, offer_id: str | None):
+    """Lit un referentiel dans le Back Office, avec cache : il change rarement.
+
+    Le referentiel est propre au tenant et ne peut etre lu qu'en ouvrant le formulaire d'une
+    candidature : d'ou la candidature temoin (TS_SELFTEST_CANDIDATE_EMAIL / TS_SELFTEST_OFFER_ID).
+    """
     cached = _REFERENTIAL_CACHE.get(name)
     if cached and time.time() - cached[0] < _REFERENTIAL_TTL_SECONDS:
         return JSONResponse(content={"values": cached[1], "cached": True})
-    witness = application_id or config.ts_selftest_application_id()
-    if not witness:
-        raise HTTPException(status_code=400, detail="application_id requis (ou TS_SELFTEST_APPLICATION_ID)")
-    _app_id, url = safety.resolve_application_url(witness, None)
+    email = candidate_email or config.ts_selftest_candidate_email()
+    offer = offer_id or config.ts_selftest_offer_id()
+    if not email or not offer:
+        raise HTTPException(
+            status_code=400,
+            detail="candidate_email et offer_id requis (ou TS_SELFTEST_CANDIDATE_EMAIL / TS_SELFTEST_OFFER_ID)",
+        )
+    email = safety.validate_candidate_email(email)
+    offer = safety.validate_offer_id(offer)
 
     def work(bot):
-        return reader(bot, url)
+        return reader(bot, email, offer)
 
     values = await run_browser_async(f"referential-{name}", work)
     _REFERENTIAL_CACHE[name] = (time.time(), values)
     return JSONResponse(content={"values": values, "cached": False})
 
 
-@app.get("/referentials/event-types", summary="Types d'événement proposés par le Back Office")
-async def referential_event_types(application_id: str = Query(None), token: str = Depends(verify_token)):
+@app.get("/referentials/event-types", summary="Types d'evenement proposes par le Back Office")
+async def referential_event_types(
+    candidate_email: str = Query(None),
+    offer_id: str = Query(None),
+    token: str = Depends(verify_token),
+):
     try:
-        return await _referential("event-types", lambda bot, url: bot.read_event_types(url), application_id)
+        return await _referential(
+            "event-types",
+            lambda bot, email, offer: bot.read_event_types(email, offer),
+            candidate_email,
+            offer_id,
+        )
     except Exception as error:
         raise_generic_server_error("/referentials/event-types", error)
 
 
-@app.get("/referentials/document-categories", summary="Catégories de pièces jointes proposées par le Back Office")
-async def referential_document_categories(application_id: str = Query(None), token: str = Depends(verify_token)):
+@app.get("/referentials/document-categories", summary="Categories de pieces jointes du Back Office")
+async def referential_document_categories(
+    candidate_email: str = Query(None),
+    offer_id: str = Query(None),
+    token: str = Depends(verify_token),
+):
     try:
         return await _referential(
-            "document-categories", lambda bot, url: bot.read_document_categories(url), application_id
+            "document-categories",
+            lambda bot, email, offer: bot.read_document_categories(email, offer),
+            candidate_email,
+            offer_id,
         )
     except Exception as error:
         raise_generic_server_error("/referentials/document-categories", error)
 
 
-@app.post("/selftest", summary="Auto-test lecture seule : login, fiche témoin, sélecteurs critiques")
+@app.post("/selftest", summary="Auto-test lecture seule : login, candidature temoin, selecteurs")
 async def selftest(token: str = Depends(verify_token)):
     try:
-        witness = config.ts_selftest_application_id()
-        url = safety.build_application_url(witness) if witness else None
+        email = config.ts_selftest_candidate_email() or None
+        offer = config.ts_selftest_offer_id() or None
 
         def work(bot):
-            return bot.selftest(url)
+            return bot.selftest(email, offer)
 
         payload = await run_browser_async("selftest", work)
         return JSONResponse(content=payload, status_code=200 if payload.get("ok") else 503)

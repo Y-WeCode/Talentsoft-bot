@@ -53,8 +53,8 @@ def _process_job(job: dict) -> None:
 
             def work(bot):
                 return bot.update_application(
-                    application_id=payload["application_id"],
-                    application_url=payload["application_url"],
+                    candidate_email=payload["candidate_email"],
+                    offer_id=payload["offer_id"],
                     event_type=payload.get("event_type"),
                     comment=payload.get("comment"),
                     event_date=payload.get("event_date"),

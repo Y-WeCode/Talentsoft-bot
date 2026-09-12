@@ -128,12 +128,19 @@ def main() -> int:
 
         if args.login:
             login = LoginPage(page, args.base_url, Deadline(120), 15000)
+            # Parcours fédéré : un écran de choix de compte précède le formulaire de l'IdP.
+            if login.is_account_choice_displayed():
+                chosen = login.choose_account(config.ts_account_choice())
+                print(f"[login] compte sélectionné: {chosen!r}")
+                page.wait_for_load_state("networkidle")
+                if args.dump:
+                    dump_page(page, out, "after_account_choice")
             if login.is_displayed():
                 login.submit_credentials(config.ts_username(), config.ts_password())
                 page.wait_for_load_state("networkidle")
                 print(f"[login] authenticated_view={login.is_authenticated_view()} url={page.url}")
             else:
-                print(f"[login] formulaire non détecté (déjà connecté ? SSO ?) url={page.url}")
+                print(f"[login] formulaire non détecté (déjà connecté ?) url={page.url}")
             if args.dump:
                 dump_page(page, out, "after_login")
 
