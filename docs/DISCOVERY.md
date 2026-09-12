@@ -704,14 +704,38 @@ docker-compose est une source d'ennuis inutile.
 
 ### Correctifs apportés
 
-1. `LoginPage._select_account_option` tente cinq gestes, du plus humain au plus direct, chacun borné à 5 s :
-   `label[for]`, conteneur `<a>`/`<label>`, `check()`, `check(force=True)`, puis `dispatch_event("click")`.
-   Le succès est vérifié par `is_checked()` après chaque tentative, jamais supposé.
+1. `LoginPage._select_account_option` tente plusieurs gestes, du plus humain au plus direct, et
+   vérifie `is_checked()` après chacun — jamais supposé.
+
+   **Premier essai en production : tous les gestes ont échoué.** Deux raisons, corrigées depuis :
+
+   - le libellé est enveloppé dans un `<a href="#">` qui **intercepte le clic** : cliquer le
+     `label[for]` ne coche donc pas le radio ;
+   - `dispatch_event("click")` ne coche pas non plus : un événement **synthétique** ne déclenche
+     pas le comportement par défaut du navigateur.
+
+   Ce qui fonctionne est `el.click()` **appelé dans la page** (`radio.evaluate`) : il coche et laisse
+   s'exécuter les gestionnaires. Un dernier filet force `checked` puis émet `input`/`change`.
+
+   Les gestes physiques (`container`, `check`, `check(force)`) ne sont tentés que si le radio est
+   réellement visible : sur un élément masqué ils ne peuvent aboutir, et chacun consommerait son
+   timeout — une vingtaine de secondes perdues à **chaque** connexion.
 2. Le sélecteur `label[for=...]` sérialise la valeur en littéral quoté : l'identifiant `airfrance.fr`
    contient un point, qu'un sélecteur CSS non quoté interpréterait comme une classe.
 3. `TS_ACCOUNT_CHOICE` accepte l'identifiant ou le libellé.
 4. Les options disponibles sont journalisées (`account_choice_options`) : ce sont des noms de compte
    applicatif, pas des données personnelles, et sans eux un échec de choix est indiagnosticable.
+   Ce journal a immédiatement prouvé son utilité en production :
+
+   ```
+   account_choice_options count=2 options=[('airfrance.fr', 'accès @rtémis pour air france'),
+                                           ('idp01test_airfrance', 'accès @rtémis pour les filiales')]
+   LoginError: account_choice_not_selectable: option non cochable (TimeoutError)
+   ```
+
+   Le compte était bien trouvé ; c'est le geste de sélection qui échouait. L'erreur énumère
+   désormais chaque tentative et son issue (`label_for:sans_effet, js_click:ok`), pour que le
+   prochain diagnostic ne reparte pas de zéro.
 
 ### Leçon d'observabilité
 
