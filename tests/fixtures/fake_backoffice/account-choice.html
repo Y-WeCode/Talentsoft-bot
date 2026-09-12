@@ -17,5 +17,12 @@
       <h2><label for="idp01test">Accès pour les filiales</label></h2></a>
     <button type="submit">Continuer</button>
   </form>
+<script>
+  // Comme sur le tenant : le lien qui enveloppe chaque option intercepte le clic. Cliquer le
+  // libelle ne coche donc PAS le radio — seul un click() appele dans la page y parvient.
+  document.querySelectorAll('form a').forEach(function (a) {
+    a.addEventListener('click', function (e) { e.preventDefault(); e.stopPropagation(); }, true);
+  });
+</script>
 </body>
 </html>

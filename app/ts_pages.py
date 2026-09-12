@@ -359,41 +359,65 @@ class LoginPage:
         # contiennent un point (`airfrance.fr`), qu'un sélecteur non quoté lirait comme une classe.
         label_for = self.page.locator(f"label[for={json.dumps(radio_id)}]") if radio_id else None
 
-        attempts = [
-            ("check", lambda: radio.check(timeout=min(self._t(), 5000))),
-        ]
+        # Un radio invisible ne peut être ni coché ni cliqué par Playwright : tenter les gestes
+        # physiques ne ferait qu'épuiser un timeout chacun — une vingtaine de secondes perdues
+        # à chaque connexion. On ne les propose que si l'élément est réellement actionnable.
+        try:
+            physically_actionable = radio.is_visible()
+        except Exception:
+            physically_actionable = False
+
+        step_timeout = min(self._t(), 3000)
+        attempts: list[tuple[str, object]] = []
         if label_for is not None:
-            attempts.insert(0, ("label_for", lambda: label_for.first.click(timeout=min(self._t(), 5000))))
-        attempts.insert(
-            1 if label_for is not None else 0,
-            ("container", lambda: container.first.click(timeout=min(self._t(), 5000))),
-        )
+            # Le libellé, lui, est visible : c'est le geste d'un recruteur, à tenter en premier.
+            attempts.append(("label_for", lambda: label_for.first.click(timeout=step_timeout)))
+        if physically_actionable:
+            attempts += [
+                ("container", lambda: container.first.click(timeout=step_timeout)),
+                ("check", lambda: radio.check(timeout=step_timeout)),
+            ]
+        else:
+            logger.info("account_choice: radio non visible, gestes physiques ignorés")
+        if physically_actionable:
+            attempts.append(("force", lambda: radio.check(force=True, timeout=step_timeout)))
         attempts += [
-            ("force", lambda: radio.check(force=True, timeout=min(self._t(), 5000))),
-            # Dernier recours : l'élément est hors flux (taille nulle, opacité zéro), aucune
-            # interaction physique n'est possible. L'événement est envoyé directement.
-            ("dispatch", lambda: radio.dispatch_event("click")),
+            # Dernier recours, et le seul qui aboutisse sur ce tenant : appeler `click()` DANS
+            # la page. Le radio porte `visibility: hidden` et son libellé est enveloppé dans un
+            # `<a href="#">` qui intercepte le clic ; aucune interaction physique ne le coche.
+            # `dispatch_event("click")` ne suffit pas non plus : un événement synthétique ne
+            # déclenche pas le comportement par défaut du navigateur. `el.click()` si, et il
+            # laisse les gestionnaires de la page s'exécuter — contrairement à `el.checked = true`.
+            ("js_click", lambda: radio.evaluate("el => el.click()")),
+            # Filet ultime : forcer l'état et notifier la page, si `click()` était neutralisé.
+            (
+                "js_checked",
+                lambda: radio.evaluate(
+                    "el => { el.checked = true;"
+                    " el.dispatchEvent(new Event('input', {bubbles: true}));"
+                    " el.dispatchEvent(new Event('change', {bubbles: true})); }"
+                ),
+            ),
         ]
 
-        last_error: Exception | None = None
+        # Le détail par tentative est conservé : sans lui, l'échec se résume à un type
+        # d'exception qui ne dit ni quel geste a été tenté, ni pourquoi il n'a pas abouti.
+        journal: list[str] = []
         for name, action in attempts:
             try:
                 action()
             except Exception as error:  # option masquée, recouverte, ou non actionnable
-                last_error = error
-                logger.debug(f"account_choice_attempt={name} failed error={type(error).__name__}")
+                journal.append(f"{name}:{type(error).__name__}")
                 continue
             try:
                 if radio.is_checked():
                     logger.info(f"account_choice_selected_via={name}")
                     return
+                journal.append(f"{name}:sans_effet")
             except Exception as error:
-                last_error = error
+                journal.append(f"{name}:is_checked_{type(error).__name__}")
 
-        raise LoginError(
-            "account_choice_not_selectable: option non cochable "
-            f"({type(last_error).__name__ if last_error else 'aucune tentative concluante'})"
-        )
+        raise LoginError(f"account_choice_not_selectable: aucun geste n'a coché l'option [{', '.join(journal)}]")
 
     def submit_credentials(self, username: str, password: str) -> None:
         username_input = first_locator(self.page, sel.LOGIN_USERNAME, self._t())
