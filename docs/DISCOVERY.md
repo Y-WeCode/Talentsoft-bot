@@ -1068,3 +1068,41 @@ En passant de la vue à l'édition (bouton « Modifier »), le document chargé 
 que l'attribut `src` de l'iframe continue d'indiquer `...View.aspx`. Un sélecteur
 `iframe[src*='...Edit']` ne la trouve donc pas. `EVENT_DIALOG_FRAME` porte un second candidat plus large
 pour couvrir ce cas.
+
+
+## Choix du compte : pourquoi les gestes Playwright ne pouvaient pas marcher
+
+Deux essais en production ont été nécessaires pour comprendre. Le second journal a tout dit :
+
+```
+account_choice_options count=2 options=[('airfrance.fr', ...), ('idp01test_airfrance', ...)]
+account_choice: radio non visible, gestes physiques ignorés
+LoginError: account_choice_not_selectable: aucun geste n'a coché l'option
+  [label_for:is_checked_TimeoutError, js_click:TimeoutError, js_checked:TimeoutError]
+```
+
+Trois enseignements, chacun contredisant une hypothèse antérieure :
+
+1. **`label_for` a réussi son clic** — l'échec porte sur `is_checked`, pas sur l'action. Le geste
+   « humain » partait donc bien, mais ne cochait rien : le `<a href="#">` qui enveloppe le libellé
+   **intercepte** l'événement.
+2. **Ce clic fait bouger la page**, ce qui **périme le locator**. Les gestes suivants (`js_click`,
+   `js_checked`) opéraient sur un élément détaché et expiraient tous.
+3. **Le coût mesuré : 90 secondes** (20:35:56 → 20:37:26), soit 3 × 30 s. Les timeouts de 3 s ne
+   s'appliquaient qu'aux *actions* ; `is_checked()` et `evaluate()` n'en recevaient aucun et
+   retombaient sur le défaut du contexte.
+
+### Ce qui a été retenu
+
+La sélection se fait désormais **en une seule évaluation dans la page** : retrouver l'option par son
+identifiant ou sa valeur, appeler `click()` dessus, se replier sur `checked = true` + `input`/`change`,
+et rendre compte de l'état obtenu. Un seul aller-retour, **aucun locator susceptible de se périmer**.
+
+Le relevé des options est lui aussi regroupé en une évaluation, pour la même raison.
+
+### Règle générale pour ce Back Office
+
+Dès qu'un élément est masqué (`visibility: hidden`, taille nulle) **ou** qu'un clic fait muter la page,
+les locators Playwright deviennent peu fiables et coûteux : chaque appel sans timeout explicite peut
+consommer 30 s pour rien. Dans ces cas, une évaluation unique dans la page est à la fois plus rapide,
+plus lisible et plus sûre.
