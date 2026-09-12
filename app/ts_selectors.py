@@ -37,6 +37,15 @@ from __future__ import annotations
 
 LOGIN_PATH = "/"
 
+# Point d'entrée du Back Office depuis l'espace collaborateur.
+#
+# Après le SSO, le tenant atterrit sur MyTalentsoft, et **viser le Back Office par son URL ne
+# suffit pas** : sa racine comme `/Home/Welcome` renvoient vers l'espace collaborateur tant que
+# la session applicative du Back Office n'est pas ouverte. C'est ce lien — celui du sélecteur
+# d'espaces, intitulé « Recrutement » — qui l'ouvre. Il est servi par l'hôte d'atterrissage,
+# pas par TS_BASE_URL.
+BACK_OFFICE_ENTRY_PATH = "/RedirectBackOffice.ashx"
+
 # Présence de l'un de ces éléments = page de login affichée.
 LOGIN_PAGE_MARKERS = [
     "input[name='Username']",

@@ -59,6 +59,7 @@ class FakeServer:
         self.credentials_posted = False
         self.landed = False
         self.expire_to_landing = False
+        self.back_office_opened = False
         self.blocked: list[str] = []
 
     def install(self, context):
@@ -82,6 +83,11 @@ class FakeServer:
             if "account=" in body:
                 self.account_chosen = True
             return route.fulfill(status=200, content_type="text/html", body=_page("login.html"))
+
+        if url.startswith(LANDING + "/RedirectBackOffice.ashx"):
+            # Point d'entree du Back Office : c'est lui qui ouvre la session applicative.
+            self.back_office_opened = True
+            return route.fulfill(status=200, content_type="text/html", body=_page("bo-entry.html"))
 
         if url.startswith(LANDING):
             # Atterrissage post-SSO, hors Back Office : le bot doit le traverser sans conclure
@@ -113,6 +119,9 @@ class FakeServer:
 
         if not logged_in:
             return route.fulfill(status=200, content_type="text/html", body=_page("account-choice.html"))
+
+        if not self.back_office_opened:
+            return route.fulfill(status=200, content_type="text/html", body=_page("sso-return.html"))
 
         if path == "/Pages/Applicants/MainPage.aspx":
             return route.fulfill(status=200, content_type="text/html", body=_page("applicant.html"))
@@ -530,3 +539,15 @@ def test_login_submits_even_when_the_button_does_nothing(bot_env):
         assert instance.is_authenticated()
     finally:
         instance.close()
+
+
+def test_back_office_is_reached_through_its_entry_point(bot):
+    """Viser le Back Office par son URL ne suffit pas apres le SSO.
+
+    Tant que sa session applicative n est pas ouverte, sa racine renvoie vers l espace
+    collaborateur. C est le lien « Recrutement » (RedirectBackOffice.ashx), servi par l hote
+    d atterrissage, qui l ouvre.
+    """
+    assert bot._server.back_office_opened is True, "le point d entree n a pas ete emprunte"
+    assert bot._on_back_office() is True
+    assert bot.is_authenticated()
