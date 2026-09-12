@@ -17,6 +17,8 @@ Contraintes imposées par le Back Office réel (docs/DISCOVERY.md) :
 - **Un `confirm()` natif** peut survenir : Playwright le rejette par défaut, d'où un handler.
 - **Déposer une pièce jointe dans une catégorie occupée ÉCRASE** le document existant : le
   contrôle anti-écrasement est non contournable.
+- **Le SSO atterrit hors du Back Office** (espace collaborateur) : le succès du login se
+  constate en deux temps, sortie du parcours SSO puis arrivée sur le Back Office.
 - **Le commentaire d'un événement n'est pas relisible** : la vérification reste faible et
   le dédoublonnage par relecture est impossible (il produirait des faux positifs).
 """
@@ -48,6 +50,7 @@ from .ts_pages import (
     JobTimeout,
     LoginError,
     LoginPage,
+    MailDialogOpened,
     SelectorNotFound,
     normalize_text,
     parse_attachment_label,
@@ -122,7 +125,15 @@ class TalentsoftBot:
             launch_kwargs["executable_path"] = executable
         self.browser = self._pw.chromium.launch(**launch_kwargs)
 
-        context_kwargs = {"accept_downloads": False, "locale": "fr-FR"}
+        # Viewport fixé explicitement : l'en-tête du Back Office est responsive et REPLIE la
+        # barre de recherche sous ~1000 px de large (constaté à 793 px, où le champ passe en
+        # `display: none`). Or cette barre est le seul chemin vers une fiche candidat.
+        # Ne pas dépendre du défaut de Playwright, qui pourrait changer de version en version.
+        context_kwargs = {
+            "accept_downloads": False,
+            "locale": "fr-FR",
+            "viewport": {"width": 1440, "height": 900},
+        }
         state_path = config.storage_state_path()
         if os.path.exists(state_path):
             context_kwargs["storage_state"] = state_path
@@ -232,7 +243,7 @@ class TalentsoftBot:
         return LoginPage(self.page, self.base_url, self.deadline, config.action_timeout_ms())
 
     def _dismiss_cookies(self) -> None:
-        """Le bandeau Didomi recouvre la page et intercepte les clics : à traiter une fois."""
+        """Refuse le bandeau Didomi, qui masque la bande basse de la fenêtre."""
         banner = CookieBanner(self.page, config.action_timeout_ms())
         if banner.is_displayed():
             banner.refuse()
@@ -303,21 +314,82 @@ class TalentsoftBot:
         except Exception:
             pass
 
-        # Attente d'un état stable : session ouverte ou erreur affichée.
+        # Attente d'un état stable : parcours SSO terminé, ou erreur affichée.
+        #
+        # Le tenant renvoie vers MyTalentsoft (espace collaborateur) et NON vers le Back
+        # Office : attendre ici les marqueurs du Back Office ferait échouer un login réussi.
+        # On se contente donc de constater la sortie du parcours d'authentification.
         waited_until = time.monotonic() + config.navigation_timeout_ms() / 1000.0
+        landed = False
         while time.monotonic() < waited_until:
             self._dismiss_cookies()
-            if login_page.is_authenticated_view():
-                self._authenticated = True
-                self.save_storage_state()
-                logger.info("login_success")
-                return
             error_text = login_page.error_text()
             if error_text:
                 logger.warning("login_rejected")
                 raise LoginError("credentials_rejected")
+            if login_page.is_authenticated_view():
+                landed = True
+                break
+            if self._sso_completed(login_page):
+                logger.info("sso_completed landing=hors_back_office")
+                landed = True
+                break
             self.page.wait_for_timeout(500)
-        raise LoginError("login_not_confirmed")
+
+        if not landed:
+            raise LoginError(f"login_not_confirmed: parcours SSO non abouti (url={self._safe_url()})")
+
+        # Rejoindre le Back Office : c'est le seul périmètre où le bot travaille, et le seul
+        # où ses marqueurs d'authentification ont un sens.
+        self._goto(self.base_url + sel.LOGIN_PATH)
+        self._dismiss_cookies()
+        if login_page.is_displayed() or login_page.is_account_choice_displayed():
+            raise LoginError("login_not_confirmed: le Back Office redemande une authentification")
+        if not login_page.is_authenticated_view():
+            raise LoginError(f"login_not_confirmed: Back Office non reconnu (url={self._safe_url()})")
+
+        self._authenticated = True
+        self.save_storage_state()
+        logger.info("login_success")
+
+    def _sso_completed(self, login_page: LoginPage) -> bool:
+        """Le parcours d'authentification est-il sorti des écrans de connexion ?
+
+        Vrai quand l'URL ne porte plus de fragment de login, qu'aucun formulaire de connexion
+        n'est affiché, et qu'une application Talentsoft a bien été servie.
+        """
+        url = (self.page.url or "").lower()
+        if any(fragment in url for fragment in sel.LOGIN_URL_FRAGMENTS):
+            return False
+        if login_page.is_displayed() or login_page.is_account_choice_displayed():
+            return False
+        from .ts_pages import any_present
+
+        return any_present(self.page, sel.POST_LOGIN_MARKERS, require_visible=False)
+
+    def _on_back_office(self) -> bool:
+        """Sommes-nous réellement sur le Back Office, et pas ailleurs sur le tenant ?
+
+        Quand la session du Back Office expire, ce tenant ne renvoie PAS vers un formulaire de
+        login : il redirige vers l'espace collaborateur (MyTalentsoft), y compris lorsqu'on
+        vise directement l'URL d'une fiche. Sans ce contrôle, le bot se croit connecté, puis
+        échoue plus loin sur une barre de recherche introuvable — un symptôme qui ne désigne
+        pas sa cause.
+        """
+        try:
+            return safety.is_same_origin(self.page.url or "")
+        except Exception:
+            return False
+
+    def _safe_url(self) -> str:
+        """Hôte et chemin uniquement : les paramètres d'un retour SSO portent des jetons."""
+        try:
+            from urllib.parse import urlparse
+
+            parsed = urlparse(self.page.url or "")
+            return f"{parsed.netloc}{parsed.path}"[:120]
+        except Exception:
+            return "?"
 
     def _wait_for_login_form(self, login_page: LoginPage) -> None:
         waited_until = time.monotonic() + min(config.navigation_timeout_ms(), 30000) / 1000.0
@@ -359,10 +431,13 @@ class TalentsoftBot:
             self._goto(self.base_url + sel.LOGIN_PATH)
             self._dismiss_cookies()
             login_page = self._login_page()
-            if login_page.is_displayed() or login_page.is_account_choice_displayed():
+            expired = (
+                login_page.is_displayed() or login_page.is_account_choice_displayed() or not self._on_back_office()
+            )
+            if expired:
                 if attempt == 2:
-                    raise SessionExpired("login_redirect_twice")
-                logger.info("session_expired_relogin")
+                    raise SessionExpired(f"session non rétablie après re-login (url={self._safe_url()})")
+                logger.info(f"session_expired_relogin url={self._safe_url()}")
                 self._authenticated = False
                 self.login()
                 continue
@@ -370,7 +445,9 @@ class TalentsoftBot:
 
         search = GlobalSearch(self.page, self.deadline, config.action_timeout_ms())
         search.search(candidate_email)
-        search.open_single_result()
+        # L email est passe a l ouverture : la suggestion est confrontee a l adresse demandee
+        # avant d etre cliquee (le tenant l affiche dans le libelle du resultat).
+        search.open_single_result(candidate_email)
 
         app_page = ApplicationPage(self.page, self.deadline, config.action_timeout_ms())
         if app_page.is_not_found():
@@ -406,7 +483,14 @@ class TalentsoftBot:
         before = len(app_page.list_events(offer_id))
 
         dialog = EventDialog(self.page, self.deadline, config.action_timeout_ms())
-        frame = dialog.open_from_workflow_action(event_type)
+        try:
+            frame = dialog.open_on_selected_application()
+        except MailDialogOpened as error:
+            # Aucune mutation : la modale de courrier a ete refermee sans validation.
+            logger.error(f"event_opens_mail_flow event_type={event_type!r}")
+            result["error"] = "event_type_sends_mail"
+            result["detail"] = str(error)
+            return result
         try:
             chosen = dialog.fill(frame, event_type, comment, event_date)
         except ValueError as error:
@@ -623,11 +707,7 @@ class TalentsoftBot:
         self.new_job()
         app_page, _ = self.open_application(candidate_email, offer_id)
         dialog = EventDialog(self.page, self.deadline, config.action_timeout_ms())
-        links = self.page.locator(sel.WORKFLOW_ACTION_LINKS[0])
-        if links.count() == 0:
-            return []
-        first_action = links.first.inner_text(timeout=5000)
-        frame = dialog.open_from_workflow_action(first_action)
+        frame = dialog.open_on_selected_application()
         try:
             return dialog.type_options(frame)
         finally:

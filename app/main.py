@@ -144,10 +144,10 @@ def _get_bot_with_bootstrap_retry():
     """Un seul retry si le bootstrap échoue (aucune mutation encore)."""
     try:
         return session_manager.get_bot()
-    except SessionBootstrapError:
+    except SessionBootstrapError as error:
         if session_manager.is_degraded():
             raise
-        logger.warning("Bootstrap session échoué, invalidate + un seul retry")
+        logger.warning(f"Bootstrap session échoué ({error}), invalidate + un seul retry")
         session_manager.invalidate("bootstrap_failed")
         return session_manager.get_bot()
 

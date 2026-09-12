@@ -2,14 +2,19 @@
 <html lang="fr">
 <head><meta charset="utf-8"><title>Sélectionner un compte - TalentSoft</title></head>
 <body>
+  <style>
+    /* Comme sur le tenant : le radio est masqué, seul son libellé est cliquable.
+       Un check() direct de Playwright échouerait ici — c'est le bug constaté en production. */
+    input[type="radio"] { position: absolute; visibility: hidden; }
+  </style>
   <!-- Passerelle de fédération : écran intermédiaire avant le formulaire de l'IdP. -->
   <h1>Sélectionnez le compte avec lequel vous souhaitez vous authentifier :</h1>
   <form method="post" action="https://idp-fake.talent-soft.com/wsfed/issue">
     <input type="hidden" name="__RequestVerificationToken" value="jeton">
-    <a href="#"><input type="radio" name="account" value="principal" id="acc1">
-      <h2><label for="acc1">Accès principal</label></h2></a>
-    <a href="#"><input type="radio" name="account" value="filiales" id="acc2">
-      <h2><label for="acc2">Accès pour les filiales</label></h2></a>
+    <a href="#"><input type="radio" name="account" value="airfrance.fr" id="airfrance.fr">
+      <h2><label for="airfrance.fr">Accès principal</label></h2></a>
+    <a href="#"><input type="radio" name="account" value="idp01test" id="idp01test">
+      <h2><label for="idp01test">Accès pour les filiales</label></h2></a>
     <button type="submit">Continuer</button>
   </form>
 </body>

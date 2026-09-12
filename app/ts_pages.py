@@ -12,6 +12,7 @@ Particularités du Back Office, relevées en phase 0 (docs/DISCOVERY.md) :
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import time
@@ -48,6 +49,13 @@ class ApplicationNotOnOffer(Exception):
 
 class CategoryOccupied(Exception):
     """La catégorie de pièce jointe contient déjà un document : déposer l'écraserait."""
+
+
+class MailDialogOpened(Exception):
+    """L'action ouvre un envoi de courrier au candidat, pas un formulaire d'événement.
+
+    Le bot referme la modale et refuse de poursuivre : valider y enverrait un message réel.
+    """
 
 
 class Deadline:
@@ -200,7 +208,11 @@ def list_options(control: Locator) -> list[str]:
 
 
 class CookieBanner:
-    """Bandeau Didomi : il recouvre la page et intercepte les clics tant qu'il est ouvert."""
+    """Bandeau Didomi, ancré en bas de la fenêtre avec un z-index maximal.
+
+    Il ne recouvre pas toute la page, mais masque la bande basse : un contrôle situé là
+    devient incliquable. On le refuse une fois, au premier chargement.
+    """
 
     def __init__(self, page: Page, action_timeout_ms: int):
         self.page = page
@@ -265,44 +277,123 @@ class LoginPage:
 
         `wanted` vide : on ne choisit que s'il n'y a qu'une seule option, sinon on refuse —
         se tromper de compte donnerait des droits ou un périmètre inattendus.
+
+        Le bouton radio est souvent **masqué en CSS**, seul son libellé étant visible et
+        cliquable. `check()` échouerait alors sur un élément non actionnable : on clique donc
+        le libellé, comme le ferait un recruteur, avec repli sur un cochage forcé.
         """
         radios = self.page.locator(sel.ACCOUNT_CHOICE_RADIOS[0])
         count = radios.count()
         if count == 0:
             raise LoginError("account_choice_no_option")
 
-        labels = []
+        labels, values = [], []
         for index in range(count):
+            radio = radios.nth(index)
             try:
-                labels.append(radios.nth(index).evaluate("el => (el.closest('label,a,div')||el).innerText || ''"))
+                labels.append(radio.evaluate("el => (el.closest('label,a,div')||el).innerText || ''"))
             except Exception:
                 labels.append("")
+            # La `value` du radio est un identifiant ASCII (`airfrance.fr`), bien plus sûr à
+            # transporter dans un .env que le libellé affiché, qui est accentué.
+            values.append((radio.get_attribute("value") or radio.get_attribute("id") or "").strip())
+
+        # Libellés et identifiants de compte applicatif, pas des données personnelles :
+        # les journaliser est ce qui rend un échec de choix diagnosticable.
+        logger.info(
+            f"account_choice_options count={count} "
+            f"options={[(v[:30], normalize_text(x)[:40]) for v, x in zip(values, labels, strict=False)]}"
+        )
 
         target = -1
         if wanted:
             wanted_norm = normalize_text(wanted)
-            for index, label in enumerate(labels):
-                if wanted_norm == normalize_text(label):
+            # Identifiant exact d'abord : sans ambiguïté et insensible aux libellés accentués.
+            for index, value in enumerate(values):
+                if value and normalize_text(value) == wanted_norm:
                     target = index
                     break
+            if target < 0:
+                for index, label in enumerate(labels):
+                    if wanted_norm == normalize_text(label):
+                        target = index
+                        break
             if target < 0:
                 for index, label in enumerate(labels):
                     if wanted_norm and wanted_norm in normalize_text(label):
                         target = index
                         break
             if target < 0:
-                raise LoginError("account_choice_not_found")
+                raise LoginError(
+                    f"account_choice_not_found: TS_ACCOUNT_CHOICE={wanted_norm[:40]!r} ne correspond "
+                    f"a aucune des {count} options (ni identifiant, ni libelle)"
+                )
         elif count == 1:
             target = 0
         else:
-            raise LoginError("account_choice_ambiguous")
+            raise LoginError(f"account_choice_ambiguous: {count} options, TS_ACCOUNT_CHOICE non renseigné")
 
-        radios.nth(target).check(timeout=self._t())
+        self._select_account_option(radios.nth(target))
+
         submit = first_locator(self.page, sel.ACCOUNT_CHOICE_SUBMIT, self._t())
         submit.click(timeout=self._t())
         chosen = normalize_text(labels[target])[:80]
-        logger.info("account_choice_submitted")
+        logger.info(f"account_choice_submitted choice={chosen[:40]!r}")
         return chosen
+
+    def _select_account_option(self, radio: Locator) -> None:
+        """Coche l'option, quel que soit l'habillage du bouton radio.
+
+        Trois tentatives, de la plus proche du geste humain à la plus directe : cliquer le
+        libellé visible, cocher le radio, forcer le cochage. Chaque tentative est bornée à
+        5 s — un radio masqué ferait sinon expirer tout le budget d'action sur la première.
+        """
+        if radio.is_checked():
+            return
+
+        container = radio.locator(sel.ACCOUNT_CHOICE_OPTION_CLICKABLE_FROM_RADIO)
+        radio_id = radio.get_attribute("id") or ""
+        # `label[for=...]` est le geste qui coche réellement un radio masqué : cliquer le
+        # conteneur ne suffit pas s'il n'établit pas lui-même l'association.
+        # La valeur est sérialisée en littéral quoté : sur le tenant, les identifiants
+        # contiennent un point (`airfrance.fr`), qu'un sélecteur non quoté lirait comme une classe.
+        label_for = self.page.locator(f"label[for={json.dumps(radio_id)}]") if radio_id else None
+
+        attempts = [
+            ("check", lambda: radio.check(timeout=min(self._t(), 5000))),
+        ]
+        if label_for is not None:
+            attempts.insert(0, ("label_for", lambda: label_for.first.click(timeout=min(self._t(), 5000))))
+        attempts.insert(
+            1 if label_for is not None else 0,
+            ("container", lambda: container.first.click(timeout=min(self._t(), 5000))),
+        )
+        attempts += [
+            ("force", lambda: radio.check(force=True, timeout=min(self._t(), 5000))),
+            # Dernier recours : l'élément est hors flux (taille nulle, opacité zéro), aucune
+            # interaction physique n'est possible. L'événement est envoyé directement.
+            ("dispatch", lambda: radio.dispatch_event("click")),
+        ]
+
+        last_error: Exception | None = None
+        for name, action in attempts:
+            try:
+                action()
+            except Exception as error:  # option masquée, recouverte, ou non actionnable
+                last_error = error
+                logger.debug(f"account_choice_attempt={name} failed error={type(error).__name__}")
+                continue
+            try:
+                if radio.is_checked():
+                    logger.info(f"account_choice_selected_via={name}")
+                    return
+            except Exception as error:
+                last_error = error
+
+        raise LoginError(
+            "account_choice_not_selectable: option non cochable "
+            f"({type(last_error).__name__ if last_error else 'aucune tentative concluante'})"
+        )
 
     def submit_credentials(self, username: str, password: str) -> None:
         username_input = first_locator(self.page, sel.LOGIN_USERNAME, self._t())
@@ -340,21 +431,54 @@ class GlobalSearch:
         field.press("Enter", timeout=self._t())
 
     def result_items(self) -> list[Locator]:
+        """Suggestions de la recherche, débarrassées de tout ce qui n'en est pas une.
+
+        Le tenant monte son menu utilisateur avec les mêmes rôles ARIA que des suggestions :
+        « Changer de mot de passe », « Centre d'aide », **« Déconnexion »**. Cliquer cette
+        dernière en croyant ouvrir une fiche ferait perdre la session à chaque tentative.
+        Le filtre est donc appliqué ici, et pas seulement dans le sélecteur.
+        """
         for candidate in sel.SEARCH_RESULT_ITEMS:
             try:
                 locator = self.page.locator(candidate)
                 count = locator.count()
-                if count:
-                    return [locator.nth(index) for index in range(count)]
+                if not count:
+                    continue
+                items = []
+                for index in range(count):
+                    item = locator.nth(index)
+                    if self._is_excluded(item):
+                        continue
+                    items.append(item)
+                if items:
+                    return items
             except Exception:
                 continue
         return []
 
-    def open_single_result(self) -> bool:
+    def _is_excluded(self, item: Locator) -> bool:
+        try:
+            label = normalize_text(item.inner_text(timeout=2000))
+        except Exception:
+            return False
+        if not label:
+            return False
+        for forbidden in sel.SEARCH_RESULT_EXCLUDED_LABELS:
+            if forbidden in label:
+                logger.warning(f"search_result_ignored label={label[:40]!r} : entrée de menu, pas un candidat")
+                return True
+        return False
+
+    def open_single_result(self, expected_email: str = "") -> bool:
         """Ouvre l'unique résultat. False si la fiche s'est ouverte directement.
 
         Lève `AmbiguousCandidate` si plusieurs résultats : ne jamais deviner, écrire sur le
         dossier d'un autre candidat serait une divulgation de données personnelles.
+
+        Quand `expected_email` est fourni, la suggestion est confrontée à cet email avant
+        d'être ouverte. Le tenant affiche l'adresse dans le libellé
+        (« PAOLI Georges(Ref: 584408)bailleulg@gmail.com ») : cette vérification transforme un
+        clic de confiance en clic vérifié, pour un coût nul.
         """
         deadline = time.monotonic() + min(self._t(), 15000) / 1000.0
         while time.monotonic() < deadline:
@@ -362,12 +486,36 @@ class GlobalSearch:
                 return False
             items = self.result_items()
             if len(items) == 1:
+                self._assert_matches_email(items[0], expected_email)
                 items[0].click(timeout=self._t())
                 return True
             if len(items) > 1:
                 raise AmbiguousCandidate(f"{len(items)} résultats")
             self.page.wait_for_timeout(300)
         raise CandidateNotFound("aucun résultat de recherche")
+
+    def _assert_matches_email(self, item: Locator, expected_email: str) -> None:
+        """Refuse une suggestion qui porte une adresse différente de celle demandée.
+
+        Le libellé n'affiche pas toujours l'email : son absence n'est donc pas un motif de
+        refus. En revanche, une adresse **présente et différente** signale qu'on s'apprête à
+        ouvrir le dossier de quelqu'un d'autre.
+        """
+        if not expected_email:
+            return
+        try:
+            label = normalize_text(item.inner_text(timeout=3000))
+        except Exception:
+            return
+        wanted = normalize_text(expected_email)
+        if wanted in label:
+            return
+        found = re.findall(r"[^\s@]+@[^\s@]+\.[a-z]{2,}", label)
+        if found and not any(normalize_text(address) == wanted for address in found):
+            raise AmbiguousCandidate(
+                f"la suggestion porte une autre adresse que celle demandée "
+                f"({safety.short_hash(found[0])} vs {safety.short_hash(expected_email)})"
+            )
 
 
 class ApplicationPage:
@@ -395,11 +543,15 @@ class ApplicationPage:
         tab.click(timeout=self._t())
         self._wait_postback(sel.APPLICATIONS_HISTORY_TABLE)
 
-    def _wait_postback(self, expected: Iterable[str]) -> None:
-        """Attend la fin d'un postback : l'URL ne change pas, seul le DOM bouge."""
+    def _wait_postback(self, expected: Iterable[str], *, require_visible: bool = False) -> None:
+        """Attend la fin d'un postback : l'URL ne change pas, seul le DOM bouge.
+
+         compte : le Back Office laisse dans le DOM des lignes repliees en
+        , dont la presence ne prouve aucun changement d'etat.
+        """
         deadline = time.monotonic() + min(self._t(), 20000) / 1000.0
         while time.monotonic() < deadline:
-            if any_present(self.page, expected, require_visible=False):
+            if any_present(self.page, expected, require_visible=require_visible):
                 return
             self.page.wait_for_timeout(250)
         raise SelectorNotFound("postback sans effet observable")
@@ -433,21 +585,35 @@ class ApplicationPage:
         text, link = matches[0]
         link.click(timeout=self._t())
         self.page.wait_for_timeout(500)
+        # Le postback de sélection déplie les événements ET charge les actions de workflow du
+        # panneau Outils : avant lui, ni les uns ni les autres ne sont exploitables. On attend
+        # donc des lignes d'événement VISIBLES — leur simple présence dans le DOM ne prouve
+        # rien, elles y sont déjà en `display: none` quand la candidature est repliée.
         try:
-            self._wait_postback(sel.EVENT_ROWS)
+            self._wait_postback(sel.EVENT_ROWS, require_visible=True)
         except SelectorNotFound:
-            # Une candidature sans aucun événement est légitime.
-            logger.info("aucune ligne d'événement après sélection de la candidature")
+            # Une candidature sans aucun événement est légitime : rien à déplier.
+            logger.info("aucune ligne d'événement visible après sélection de la candidature")
         if not self.selected_offer_matches(offer_id):
             raise ApplicationNotOnOffer(f"candidature {offer_id} non active après sélection")
         return normalize_text(text)[:120]
 
     def selected_offer_matches(self, offer_id: str) -> bool:
-        """Garde-fou avant toute mutation : la candidature développée est-elle la bonne ?
+        """Garde-fou avant toute mutation : la candidature active est-elle la bonne ?
 
-        `tr.selectedLine` n'étant pas fiable (la classe disparaît après un postback), on se
-        fonde sur l'ordre du DOM : les lignes d'événement suivent la ligne de leur candidature.
+        Deux preuves, de la plus directe à la plus structurelle :
+
+        1. `tr.selectedLine` porte la référence de l'offre. Le Back Office pose cette classe
+           sur la candidature sélectionnée — elle est absente au chargement de la fiche et
+           après un postback de mutation, mais présente après une sélection explicite, qui est
+           toujours ce que fait le bot.
+        2. À défaut, l'ordre du DOM : les lignes d'événement suivent la ligne de leur
+           candidature, jusqu'à la candidature suivante.
         """
+        selected = self._selected_row_text()
+        if selected is not None:
+            return safety.offer_reference_matches(selected, offer_id)
+
         rows = self._history_rows()
         if not rows:
             return False
@@ -461,6 +627,16 @@ class ApplicationPage:
                 # Des événements sont rattachés à une AUTRE candidature : mauvaise cible.
                 return False
         return saw_target
+
+    def _selected_row_text(self) -> str | None:
+        """Texte de la ligne marquée sélectionnée, ou None si le Back Office n'en marque aucune."""
+        try:
+            locator = self.page.locator(sel.SELECTED_APPLICATION_ROW[0])
+            if locator.count() != 1:
+                return None
+            return locator.first.inner_text(timeout=3000)
+        except Exception:
+            return None
 
     def _history_rows(self) -> list[tuple[str, str]]:
         """Lignes du tableau d'historique, dans l'ordre du DOM : ('application'|'event', texte)."""
@@ -540,9 +716,15 @@ class EventDialog:
         return self.page.frame_locator(sel.EVENT_DIALOG_FRAME[0])
 
     def wait_open(self) -> FrameLocator:
-        """Attend que l'iframe soit présente ET son formulaire chargé."""
+        """Attend que l'iframe soit présente ET son formulaire chargé.
+
+        Surveille en parallèle l'ouverture d'un parcours d'envoi de courrier : certaines
+        actions de workflow ouvrent celui-ci au lieu du formulaire d'événement. Dans ce cas on
+        referme et on abandonne, plutôt que d'attendre en laissant la modale ouverte.
+        """
         deadline = time.monotonic() + min(self._t(), 20000) / 1000.0
         while time.monotonic() < deadline:
+            self._abort_if_mail_dialog()
             if any_present(self.page, sel.EVENT_DIALOG_FRAME, require_visible=False):
                 frame = self.frame()
                 try:
@@ -553,40 +735,48 @@ class EventDialog:
             self.page.wait_for_timeout(250)
         raise SelectorNotFound("formulaire d'événement non chargé")
 
-    def open_from_workflow_action(self, action_label: str | None = None) -> FrameLocator:
-        """Ouvre le formulaire d'événement via une action du panneau Outils.
+    def _abort_if_mail_dialog(self) -> None:
+        """Referme un parcours d'envoi de courrier ouvert par mégarde, et refuse de continuer.
 
-        Le panneau Outils ne propose qu'un sous-ensemble des types du référentiel (89 actions
-        pour 105 types sur le tenant de recette) : un type demandé peut n'avoir aucune action
-        dédiée. L'action ne sert donc qu'à **ouvrir** le formulaire ; le type effectif est
-        ensuite choisi dans la liste déroulante, qui porte le référentiel complet.
-
-        On privilégie l'action homonyme quand elle existe (le formulaire s'ouvre alors déjà
-        sur le bon type), sinon on prend la première action disponible.
-
-        Un `confirm()` natif peut survenir : il est accepté par le handler du scraper.
+        Constaté sur le tenant : l'action « Candidature à l'étude » n'ouvre pas le formulaire
+        d'événement mais `ActionMailLanguageChoicePage`, dont le bouton « Valider » (`btnSend`)
+        **envoie un courrier au candidat**. Poursuivre dans cette modale enverrait un message
+        réel : on annule et on remonte une erreur explicite.
         """
-        links = self.page.locator(sel.WORKFLOW_ACTION_LINKS[0])
-        count = links.count()
-        if count == 0:
-            raise SelectorNotFound("aucune action de workflow sur la fiche")
+        if not any_present(self.page, sel.FORBIDDEN_DIALOG_FRAMES, require_visible=False):
+            return
+        logger.error("mail_dialog_detected : parcours d'envoi de courrier ouvert, annulation")
+        try:
+            frame = self.page.frame_locator(sel.FORBIDDEN_DIALOG_FRAMES[0])
+            cancel = first_locator(self.page, sel.FORBIDDEN_DIALOG_CANCEL, 5000, scope=frame, require_visible=False)
+            cancel.click(timeout=5000)
+            self.page.wait_for_timeout(1000)
+        except Exception as error:
+            logger.warning(f"mail_dialog_cancel_failed error={type(error).__name__}")
+        raise MailDialogOpened("cette action ouvre un envoi de courrier au candidat, pas un formulaire d'événement")
 
-        target = None
-        if action_label:
-            wanted = normalize_text(action_label)
-            for index in range(count):
-                item = links.nth(index)
-                try:
-                    if normalize_text(item.inner_text(timeout=2000)) == wanted:
-                        target = item
-                        break
-                except Exception:
-                    continue
-        if target is None:
-            logger.info("aucune action homonyme : ouverture par la première action disponible")
-            target = links.first
+    def open_on_selected_application(self) -> FrameLocator:
+        """Ouvre « Création d'un événement » depuis la ligne de la candidature sélectionnée.
 
-        target.click(timeout=self._t())
+        Le bouton « Effectuer une action sur la candidature » (`btnEventActionNew`), porté par
+        la ligne elle-même, est le SEUL chemin qui ouvre un formulaire de saisie complet —
+        type, date et commentaire — et qui crée l'événement en une seule passe.
+
+        Les actions du panneau Outils ne conviennent pas : selon le paramétrage, elles créent
+        l'événement **sans proposer de commentaire**, ou ouvrent un **envoi de courrier** au
+        candidat. Vérifié sur le tenant (docs/DISCOVERY.md).
+
+        Ce bouton appartenant à la ligne de la candidature, la cible est sans ambiguïté :
+        aucun risque d'écrire sur une autre candidature du même candidat.
+        """
+        row = self.page.locator(sel.SELECTED_APPLICATION_ROW[0])
+        if row.count() != 1:
+            raise SelectorNotFound(
+                "aucune candidature sélectionnée : le bouton d'action appartient à sa ligne "
+                "(sélectionner la candidature avant d'ouvrir le formulaire)"
+            )
+        button = first_locator(self.page, sel.EVENT_ACTION_BUTTON, self._t(), scope=row.first)
+        button.click(timeout=self._t())
         return self.wait_open()
 
     def type_options(self, frame: FrameLocator | None = None) -> list[dict]:

@@ -90,6 +90,15 @@ ACCOUNT_CHOICE_MARKERS = [
 
 ACCOUNT_CHOICE_RADIOS = ["input[type='radio']"]
 
+# Zone réellement cliquable d'une option, exprimée RELATIVEMENT à son bouton radio.
+# Sur le tenant, chaque radio est enveloppé dans un lien qui porte le libellé, et le radio
+# lui-même est masqué en CSS : c'est ce conteneur qu'un recruteur clique, et le seul élément
+# actionnable par Playwright.
+# Remonter depuis le radio plutôt que lister les conteneurs : une page qui imbrique
+# <a><label><input radio></label></a> produirait deux fois plus de conteneurs que de radios,
+# et tout appariement par position serait faux.
+ACCOUNT_CHOICE_OPTION_CLICKABLE_FROM_RADIO = "xpath=ancestor::*[self::a or self::label][1]"
+
 ACCOUNT_CHOICE_SUBMIT = [
     "role=button[name=/^\\s*continuer\\s*$/i]",
     "button[type='submit']",
@@ -122,15 +131,35 @@ AUTHENTICATED_MARKERS = [
 
 # --- Bandeau de consentement (Didomi) -------------------------------------------------
 #
-# Affiché au premier chargement, il recouvre la page et intercepte tous les clics.
-# Le bot refuse les finalités non essentielles.
+# Affiché au premier chargement, ancré en BAS de la fenêtre (environ un tiers de la hauteur
+# sur le tenant), avec un z-index maximal. Il ne recouvre donc pas toute la page, mais masque
+# ce qui se trouve dans cette bande : un contrôle en bas d'écran devient incliquable.
+# Le bot refuse les finalités non essentielles dès le premier chargement.
 
 COOKIE_BANNER = ["#didomi-notice", "#didomi-host", ".didomi-popup-container"]
 
+# ATTENTION : ne lister ici que des sélecteurs qui désignent le REFUS.
+# Le bandeau du tenant expose trois boutons de même facture :
+#   #didomi-notice-learn-more-button  « EN SAVOIR PLUS »
+#   #didomi-notice-disagree-button    « REFUSER »            <- le seul acceptable
+#   #didomi-notice-agree-button       « ACCEPTER & FERMER »
+# Un sélecteur de classe générique (`button.didomi-button-standard`) attrape « EN SAVOIR
+# PLUS » : le bot croirait refuser tout en ouvrant un panneau. Cibler l'id, puis le libellé.
 COOKIE_REFUSE = [
     "#didomi-notice-disagree-button",
-    "role=button[name=/refuser|tout refuser|continuer sans accepter/i]",
-    "button.didomi-button-standard",
+    "role=button[name=/^\\s*refuser\\s*$|tout refuser|continuer sans accepter/i]",
+]
+
+# Signe que le parcours d'authentification fédérée est terminé, quelle que soit l'application
+# d'atterrissage. Le tenant renvoie vers MyTalentsoft (espace collaborateur) et NON vers le
+# Back Office : les marqueurs de celui-ci n'y matchent pas. Sans ce jalon intermédiaire, le
+# bot conclurait que le login a échoué alors qu'il vient de réussir.
+POST_LOGIN_MARKERS = [
+    "#TSBody",
+    "[href*='MyTalentsoft' i]",
+    "[class*='ts-page' i]",
+    "a.rtsLink",
+    "input[placeholder*='Rechercher' i]",
 ]
 
 # --- Recherche d'un candidat par email -------------------------------------------------
@@ -146,10 +175,26 @@ GLOBAL_SEARCH_INPUT = [
 ]
 
 # Résultats de la recherche globale (overlay React monté en portal).
+#
+# DANGER, constaté le 12/09/2026 : `[role='menu'] [role='menuitem']` attrape le **menu
+# utilisateur** de l'en-tête (« Changer de mot de passe », « Centre d'aide », « Déconnexion »).
+# Un sélecteur de résultats doit être assez étroit pour ne jamais désigner ces entrées :
+# cliquer « Déconnexion » en croyant ouvrir une fiche ferait perdre la session à chaque essai.
+# On s'en tient donc aux rôles de liste de suggestions, jamais aux menus.
 SEARCH_RESULT_ITEMS = [
-    "role=option",
+    "[role='listbox'] [role='option']",
+    "[role='option']",
     "[role='listbox'] li",
-    "[role='menu'] [role='menuitem']",
+]
+
+# Libellés du menu utilisateur : un « résultat » qui porte l'un d'eux n'en est pas un.
+# Garde-fou de dernier recours, si le tenant montait ses suggestions dans un menu.
+SEARCH_RESULT_EXCLUDED_LABELS = [
+    "déconnexion",
+    "deconnexion",
+    "changer de mot de passe",
+    "centre d'aide",
+    "centre d’aide",
 ]
 
 # --- Fiche candidature ---------------------------------------------------------------
@@ -195,9 +240,15 @@ DOCUMENTS_TAB = [
 #   tr.ch_content_outerrep  une candidature — texte « Réponse à offre <intitulé> ( réf. <référence> ) »
 #   tr.trChildrenEvent      les événements de la candidature développée
 #
-# ATTENTION : `tr.selectedLine` n'est PAS fiable — la classe disparaît après un postback.
-# Pour cibler une candidature, se fier à l'ordre du DOM : les `trChildrenEvent` d'une
-# candidature suivent sa ligne `ch_content_outerrep`, jusqu'à la `ch_content_outerrep` suivante.
+# ORDRE OBLIGATOIRE : tant qu'aucune candidature n'est sélectionnée, les lignes d'événement
+# sont dans le DOM mais en `display: none`, et les actions de workflow du panneau Outils ne
+# sont PAS chargées du tout. Le postback de sélection (clic sur `lnkOfferLabel`) déplie les
+# premières et charge les secondes. Sélectionner d'abord, agir ensuite.
+#
+# `tr.selectedLine` marque la candidature sélectionnée : absent au chargement de la fiche et
+# après un postback de mutation, présent après une sélection explicite — ce que le bot fait
+# toujours. On s'en sert donc comme preuve directe, avec l'ordre du DOM en second recours
+# (les `trChildrenEvent` d'une candidature suivent sa ligne, jusqu'à la suivante).
 
 APPLICATIONS_HISTORY_TABLE = ["table.events-history-table", "table.result-grid-view"]
 
@@ -225,13 +276,56 @@ RECRUITER_TOOLS_ACTIONS = [
     "[id$='frmApplicantActions_SubformTable'] >> text=/actions/i",
 ]
 
-# Actions de workflow listées dans le panneau Outils. Beaucoup déclenchent un confirm()
-# JavaScript natif : Playwright le REJETTE par défaut, il faut un handler `page.on("dialog")`.
+# LE bouton qui ouvre « Création d'un événement » : il est porté par la LIGNE de la
+# candidature, colonne « Action », intitulé « Effectuer une action sur la candidature ».
+# C'est le seul chemin qui permette de créer un événement AVEC son commentaire en une passe,
+# et il est intrinsèquement lié à la candidature de sa ligne — donc sans ambiguïté de cible.
+EVENT_ACTION_BUTTON = ["a[id$='btnEventActionNew']"]
+
+# Autres boutons de la même ligne. Listés pour qu'on sache les reconnaître et les ÉVITER :
+#   btnSendMailNew  « Correspondre avec le candidat » -> envoie un courrier
+#   btnDocumentReader / btnEventDetailsNew -> lecture seule, hors périmètre du bot
+ROW_SEND_MAIL_BUTTON = ["a[id$='btnSendMailNew']"]
+
+# Actions de workflow du panneau Outils. LE BOT NE LES UTILISE PAS : selon le paramétrage,
+# une action peut (a) créer l'événement directement SANS proposer de commentaire, ou
+# (b) ouvrir un envoi de courrier au candidat. Aucune n'ouvre un formulaire de saisie.
+# Conservées pour la lecture du référentiel et le diagnostic. Beaucoup déclenchent un
+# confirm() natif : Playwright le REJETTE par défaut, d'où le handler `page.on("dialog")`.
 WORKFLOW_ACTION_LINKS = ["a[id*='lblJobAppActionName']"]
 
 # L'iframe qui porte le formulaire d'événement. `rwndrnd` est un anti-cache aléatoire :
 # cibler par le nom de la page, jamais par l'URL complète.
-EVENT_DIALOG_FRAME = ["iframe[src*='JobApplicationChildEventEdit']"]
+# L'iframe du formulaire. Le second candidat couvre la navigation INTERNE de l'iframe :
+# en passant de la vue à l'édition (bouton « Modifier »), le document chargé devient
+# `...Edit.aspx` alors que l'attribut `src` continue d'indiquer `...View.aspx`.
+EVENT_DIALOG_FRAME = [
+    "iframe[src*='JobApplicationChildEventEdit']",
+    "iframe[src*='JobApplicationChildEvent']",
+]
+
+# Vue d'un événement : c'est LA qu'apparaît le commentaire, sous le libellé « Motif ».
+# Ouverte en cliquant le titre de l'événement dans l'historique (`lnkEventTitle`).
+EVENT_VIEW_FRAME = ["iframe[src*='JobApplicationChildEventView']"]
+EVENT_VIEW_CLOSE = ["input[id$='btnClose']"]
+# Le commentaire y est précédé de ce libellé.
+EVENT_VIEW_COMMENT_LABEL = "motif"
+
+# Boutons de la vue. `btnDelete` supprime l'événement : LE BOT NE DOIT JAMAIS LE CLIQUER.
+EVENT_VIEW_DELETE = ["input[id$='btnDelete']"]
+
+# Modales que le bot NE DOIT JAMAIS VALIDER. Certaines actions de workflow n'ouvrent pas le
+# formulaire d'événement mais un parcours d'envoi de courrier au candidat : l'écran de choix
+# de langue (`ActionMailLanguageChoicePage`), puis l'éditeur de courrier.
+# Ouvrir un tel parcours par erreur est déjà fâcheux ; le valider enverrait un message réel à
+# un candidat. Détecter, annuler, et signaler — jamais poursuivre.
+FORBIDDEN_DIALOG_FRAMES = [
+    "iframe[src*='ActionMailLanguageChoicePage']",
+    "iframe[src*='Correspondence/']",
+]
+
+# Bouton d'annulation de ces modales, pour refermer proprement ce qu'on a ouvert par erreur.
+FORBIDDEN_DIALOG_CANCEL = ["input[id$='btnCancel']", "input.cancel-button"]
 
 # Boutons « Ajouter » de l'onglet Historique. ATTENTION à ne pas les confondre :
 #   btCreateApplicantEvent      → événement au niveau CANDIDAT (la personne)
@@ -254,7 +348,11 @@ EVENT_COMMENT = ["textarea[id$='EventComment']", "textarea"]
 # Pré-rempli avec l'utilisateur connecté (le compte technique du bot).
 EVENT_SUPERVISOR_SELECT = ["select[id$='ddlSupervisor']"]
 
-EVENT_SUBMIT = ["input[id$='btValidate']", "input.valid-button"]
+# DANGER, constaté le 12/09/2026 : `input.valid-button` est une classe PARTAGÉE par toutes
+# les modales du Back Office, y compris `ActionMailLanguageChoicePage`, dont le bouton
+# `btnSend` (« Valider ») ENVOIE UN COURRIER AU CANDIDAT. Ne jamais valider sur une classe
+# générique : seul le suffixe d'identifiant dit ce que l'on valide.
+EVENT_SUBMIT = ["input[id$='btValidate']"]
 EVENT_CANCEL = ["input[id$='btCancel']", "input.cancel-button"]
 
 # Limite réelle du champ commentaire dans le Back Office.
@@ -283,7 +381,9 @@ ATTACHMENT_DIALOG_FRAME = ["iframe[src*='AttachedFileEdit']"]
 ATTACHMENT_FILE_INPUTS = ["input[type='file']"]
 
 # Bouton de validation du dépôt : value « Enregistrer » (et non « Valider »).
-ATTACHMENT_SUBMIT = ["input[id$='btValidate']", "input.valid-button"]
+# Comme pour les événements, pas de repli sur `input.valid-button` : cette classe désigne
+# aussi le bouton d'envoi de courrier d'une autre modale.
+ATTACHMENT_SUBMIT = ["input[id$='btValidate']"]
 ATTACHMENT_CANCEL = ["input[id$='btCancel']", "input.cancel-button"]
 
 # Contraintes affichées par le formulaire de dépôt.

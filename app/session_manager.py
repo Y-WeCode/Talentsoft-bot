@@ -17,6 +17,26 @@ from . import scraper as scraper_module
 logger = logging.getLogger(__name__)
 
 
+def _safe_bootstrap_detail(error: BaseException) -> str:
+    """Détail journalisable d'un échec de bootstrap, sans jamais exposer de contenu tiers.
+
+    Le message n'est conservé que pour les exceptions **que ce dépôt construit lui-même**, et
+    dont les messages sont écrits sans secret par contrat (`LoginError`, `SelectorNotFound`).
+    Toute autre exception — Playwright en tête — peut porter une URL complète, du HTML ou une
+    valeur saisie : seul son type est retenu.
+
+    Sans ce détail, un échec de login est indiagnosticable en production ; avec lui pour
+    n'importe quelle exception, les logs deviennent un canal de fuite.
+    """
+    from .ts_pages import LoginError, SelectorNotFound
+
+    name = type(error).__name__
+    if not isinstance(error, LoginError | SelectorNotFound):
+        return name
+    message = str(error).strip().replace("\n", " ")
+    return f"{name}: {message[:200]}" if message else name
+
+
 class SessionBootstrapError(Exception):
     """Création ou authentification de la session partagée en échec."""
 
@@ -171,7 +191,7 @@ class SessionManager:
         except Exception as error:
             self._close_state()
             self._record_login_failure(type(error).__name__)
-            raise SessionBootstrapError(type(error).__name__) from error
+            raise SessionBootstrapError(_safe_bootstrap_detail(error)) from error
 
 
 session_manager = SessionManager()

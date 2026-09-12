@@ -56,9 +56,11 @@ Formulaire de l'IdP (étape 3), relevé dans le DOM :
 - Atterrissage sur `https://testairfrance.talent-soft.com/MyTalentsoft#/Me` (« Mon Espace ») : application
   Angular à routes en hash, espace collaborateur. Le Back Office recruteur est sur l'**autre** hôte
   (`testairfrance-rh`) et reste accessible directement par URL : le bot n'a pas besoin de passer par MyTalentsoft.
-- **Bandeau de consentement Didomi** (`#didomi-notice`, conteneur `#didomi-host`) affiché par-dessus la page.
-  Il intercepte les clics tant qu'il n'est pas fermé : le bot devra le traiter au premier chargement
-  (refus des finalités non essentielles), sinon toutes les actions échoueront sur un élément masqué.
+- **Bandeau de consentement Didomi** (`#didomi-notice`, conteneur `#didomi-host`).
+  Mesuré le 12/09/2026 : 793 × 298 ancré en bas d'une fenêtre de 808 × 910, `z-index` maximal.
+  Il ne recouvre donc **pas** toute la page, contrairement à ce qui avait été noté d'abord, mais
+  masque la bande basse : un contrôle situé là devient incliquable. Le bot le refuse au premier
+  chargement (finalités non essentielles).
 - Aucun lien `logout`/`deconnexion` en clair dans le DOM à ce stade : les marqueurs `AUTHENTICATED_MARKERS`
   actuels (basés sur un lien de déconnexion) ne matchent pas. À remplacer par un marqueur fiable du Back Office.
 
@@ -549,10 +551,15 @@ Le texte du commentaire **n'apparaît nulle part dans la page** (vérifié par r
    la relecture du Back Office. Le cas `unverified` + rejeu est le plus dangereux : il créerait un doublon
    sans aucun moyen de le détecter. Conserver la règle « ne jamais rejouer après `mutation_started` ».
 
-### Constat 3 — `tr.selectedLine` n'est pas fiable
+### Constat 3 — `tr.selectedLine` : présent après sélection, absent après mutation
 
-Après le postback de validation, **plus aucune ligne ne porte `selectedLine`** : les deux candidatures sont
-en `ch_content_outerrep`. Le garde-fou envisagé ne peut donc pas reposer sur cette classe.
+Après le postback de validation, **plus aucune ligne ne porte `selectedLine`**.
+
+> **Rectification du 12/09/2026 (audit du parcours réel).** Ce constat avait été généralisé à tort en
+> « `selectedLine` n'est pas fiable ». En réalité la classe est **présente après une sélection explicite**
+> de candidature — ce que le bot fait systématiquement avant toute action. Elle est absente au chargement
+> de la fiche et après un postback de mutation, pas en permanence.
+> `selected_offer_matches()` s'en sert donc comme **preuve directe**, avec l'ordre du DOM en second recours.
 
 **Critère de remplacement — l'ordre du DOM** : les `tr.trChildrenEvent` d'une candidature suivent
 immédiatement sa ligne `tr.ch_content_outerrep`, jusqu'à la ligne `ch_content_outerrep` suivante.
@@ -662,3 +669,378 @@ Espaces et tirets sont préservés.
 
 → Toute comparaison de noms (vérification `verified`, détection `already_present`) doit être
 **insensible à la casse**. Comparer `normalize_text()` des deux côtés.
+
+## Écran de choix de compte : structure exacte (12/09/2026, après échec du selftest)
+
+Le premier `POST /selftest` contre le tenant a échoué au choix du compte, avec 30 s de timeout par
+tentative. Inspection du DOM réel :
+
+| Attribut du bouton radio | Valeur |
+| --- | --- |
+| `visibility` | **`hidden`** |
+| `position` | `absolute` |
+| Dimensions | 13 × 13 (non nulles) |
+| `opacity` | `1` |
+
+**C'est `visibility: hidden` qui bloquait.** Playwright refuse de cocher un élément invisible et attend
+jusqu'au timeout d'action. `check(force=True)` ne suffit pas davantage : l'élément reste hors interaction.
+
+Chaque option expose en revanche un `<label for>` **visible, associé et non recouvert**
+(`label.control` pointe bien le radio, `elementFromPoint` renvoie le label lui-même) : c'est l'élément que
+clique un recruteur, et le seul geste qui coche réellement l'option.
+
+### Les deux comptes du tenant de recette
+
+| `value` / `id` du radio | Libellé affiché |
+| --- | --- |
+| `airfrance.fr` | Accès @rtémis pour Air France |
+| `idp01test_airfrance` | Accès @rtémis pour les filiales |
+
+Le champ posté est `IdentityProviderName`.
+
+**Les identifiants sont en ASCII, les libellés sont accentués** (`@rtémis`). `TS_ACCOUNT_CHOICE` accepte
+donc les deux, et l'identifiant est à privilégier : un libellé accentué dans un `.env` traversant
+docker-compose est une source d'ennuis inutile.
+
+### Correctifs apportés
+
+1. `LoginPage._select_account_option` tente cinq gestes, du plus humain au plus direct, chacun borné à 5 s :
+   `label[for]`, conteneur `<a>`/`<label>`, `check()`, `check(force=True)`, puis `dispatch_event("click")`.
+   Le succès est vérifié par `is_checked()` après chaque tentative, jamais supposé.
+2. Le sélecteur `label[for=...]` sérialise la valeur en littéral quoté : l'identifiant `airfrance.fr`
+   contient un point, qu'un sélecteur CSS non quoté interpréterait comme une classe.
+3. `TS_ACCOUNT_CHOICE` accepte l'identifiant ou le libellé.
+4. Les options disponibles sont journalisées (`account_choice_options`) : ce sont des noms de compte
+   applicatif, pas des données personnelles, et sans eux un échec de choix est indiagnosticable.
+
+### Leçon d'observabilité
+
+`session_manager` ne propageait que le **type** de l'exception : 62 secondes d'attente pour un
+`RuntimeError` sans contexte. Le message est désormais conservé — mais **uniquement** pour les exceptions
+que ce dépôt construit lui-même (`LoginError`, `SelectorNotFound`), dont les messages sont écrits sans
+secret par contrat. Une exception Playwright, qui peut porter une URL complète ou du HTML, ne propage
+toujours que son type.
+
+## Audit des sélecteurs en conditions réelles (12/09/2026)
+
+Parcours rejoué dans le navigateur, en testant à chaque écran les sélecteurs réels du bot.
+
+### Écran de choix de compte — conforme
+
+| Sélecteur | Constat |
+| --- | --- |
+| `ACCOUNT_CHOICE_RADIOS` | 2 trouvés, **0 visible** (`visibility: hidden`) |
+| `ACCOUNT_CHOICE_SUBMIT` | 1 visible |
+
+URL observée : `/hrd?wa=wsignin1.0&wtrealm=urn:oidc-relyingparty:...` — le tenant mêle WS-Fed et OIDC.
+`LOGIN_URL_FRAGMENTS` y détecte `signin` : le bot ne se croit pas authentifié sur cet écran.
+
+### Formulaire de l'IdP — conforme
+
+`LOGIN_USERNAME` (`input[name='Username']`), `LOGIN_PASSWORD`, `LOGIN_SUBMIT`
+(`button[type='submit'].btn-primary`) et `LOGIN_PAGE_MARKERS` matchent tous, visibles et actifs.
+
+### Bandeau de consentement — un sélecteur était DANGEREUX
+
+Le bandeau expose trois boutons de même facture :
+
+| id | Libellé |
+| --- | --- |
+| `didomi-notice-learn-more-button` | EN SAVOIR PLUS → |
+| **`didomi-notice-disagree-button`** | **REFUSER** |
+| `didomi-notice-agree-button` | ACCEPTER & FERMER |
+
+`#didomi-notice-disagree-button` est correct. Mais le second candidat de `COOKIE_REFUSE`,
+`button.didomi-button-standard`, matche **« EN SAVOIR PLUS »** : en cas de repli, le bot aurait ouvert un
+panneau en croyant refuser. Ce candidat a été retiré au profit d'un sélecteur par libellé.
+
+### Atterrissage post-SSO — BLOQUANT, corrigé
+
+Après authentification, le navigateur atterrit sur **`testairfrance.talent-soft.com/MyTalentsoft#/Me`**
+(espace collaborateur), et **non** sur le Back Office. Constats :
+
+- aucun marqueur de `AUTHENTICATED_MARKERS` n'y matche (`markers: []`, `search_input: 0`) ;
+- toute la session s'y poursuit (68 requêtes vers cet hôte).
+
+Deux conséquences, toutes deux fatales avant correction :
+
+1. `login()` attendait les marqueurs du Back Office sur cette page : un login **réussi** aurait été
+   déclaré en échec (`login_not_confirmed`) après 45 s.
+2. Cet hôte n'étant ni `TS_BASE_URL` ni un hôte d'authentification déclaré, **`_guard_route` aurait
+   bloqué la navigation d'atterrissage** et le parcours n'aurait jamais abouti.
+
+Correctifs :
+
+- `TS_AUTH_HOSTS` désigne désormais les hôtes **traversés pendant l'authentification, atterrissage
+  compris**. Pour ce tenant, trois valeurs sont nécessaires :
+  `testfedauthsbg1`, `testidpsbg1` **et `testairfrance`** (espace collaborateur).
+- `login()` distingue deux jalons : la **fin du parcours SSO** (`POST_LOGIN_MARKERS`, valable quelle que
+  soit l'application d'atterrissage), puis la **présence sur le Back Office**, obtenue en y naviguant
+  explicitement avant de conclure au succès.
+- Le faux Back Office reproduit cet atterrissage sur un hôte distinct, pour que les tests couvrent le cas.
+
+### Recherche par email — VALIDÉE sur le tenant
+
+Recherche de `bailleulg@gmail.com` depuis `/Home/Welcome` :
+
+```
+[role='listbox'] [role='option']  →  1 résultat
+libellé : « PAOLI Georges(Ref: 584408)bailleulg@gmail.com »
+actionable: true, non recouvert, aucune entrée de menu capturée
+```
+
+Le sélecteur prioritaire du bot est confirmé, et **l'unicité du résultat par email** l'est aussi.
+
+Deux enseignements supplémentaires :
+
+1. **Le libellé du résultat contient l'adresse.** `open_single_result()` la confronte désormais à
+   l'email demandé : une suggestion portant une **autre** adresse est refusée
+   (`AmbiguousCandidate`) au lieu d'être ouverte. L'absence d'adresse dans le libellé n'est pas
+   un motif de refus — seule une adresse présente et différente l'est.
+2. **`[role='menu'] [role='menuitem']` capturait le menu utilisateur** (« Changer de mot de passe »,
+   « Centre d'aide », « **Déconnexion** »). Ce candidat a été retiré, et un filtre d'exclusion par
+   libellé a été ajouté dans `GlobalSearch.result_items()` : cliquer « Déconnexion » en croyant ouvrir
+   une fiche aurait fait perdre la session à chaque tentative.
+
+### Viewport : la barre de recherche se replie en dessous de ~1000 px
+
+Constaté à 793 px de large : le champ de recherche passe sous un ancêtre en `display: none`, donc
+invisible et inutilisable. À 1280 px, il mesure 480 × 33 et redevient normal.
+
+La barre étant le **seul** chemin vers une fiche candidat, le contexte navigateur fixe désormais un
+viewport explicite de 1440 × 900, au lieu de s'en remettre au défaut de Playwright.
+
+### Accès direct au Back Office
+
+`{base}/Home/Welcome` ouvre directement l'accueil recrutement (titre « Accueil recrutement »), et les
+marqueurs `AUTHENTICATED_MARKERS` y matchent (`/Home/Welcome`, `/VacancyDashboard` visibles).
+
+### Sélection de candidature : un postback qui conditionne tout le reste
+
+Mesuré sur la fiche témoin, **avant** toute sélection :
+
+| Élément | État |
+| --- | --- |
+| `tr.ch_content_outerrep` | 3 candidatures, visibles |
+| `tr.trChildrenEvent` | 6 lignes présentes, **0 visible** (`display: none`) |
+| `a[id*='lblJobAppActionName']` | **0 — absentes du DOM** |
+| `tr.selectedLine` | absent |
+
+**Après** un clic sur le lien `lnkOfferLabel` de la candidature visée :
+
+| Élément | État |
+| --- | --- |
+| `tr.trChildrenEvent` | 6 lignes, **toutes visibles** |
+| `a[id*='lblJobAppActionName']` | **88 liens, tous visibles, tous avec `confirm()`** |
+| `tr.selectedLine` | **présent**, sur la bonne candidature |
+
+Trois conséquences pour le bot :
+
+1. **Sélectionner avant d'agir** n'est pas une précaution mais une nécessité : les actions de workflow
+   n'existent pas dans le DOM tant qu'aucune candidature n'est sélectionnée.
+2. Attendre la **visibilité** des lignes d'événement, pas leur présence : elles sont déjà là, repliées.
+3. Les **88 actions déclenchent toutes un `confirm()`** natif. Sans le handler `page.on("dialog")`,
+   aucune ne produirait le moindre effet, silencieusement.
+
+### Accès direct à une fiche : `RedirectionMenu.ashx`
+
+Le lien porté par une suggestion de recherche est :
+
+```
+{base}/Pages/Utils/RedirectionMenu.ashx?key=ApplicantView&id=<applicantGuid>
+```
+
+Cette URL **ouvre directement la fiche**, onglet Historique actif. Deux enseignements :
+
+- la recherche **expose le `applicantGuid`**, l'identifiant interne qu'on croyait hors de portée ;
+- une fois ce GUID connu pour un candidat, la fiche est atteignable sans repasser par l'overlay React.
+  Piste d'optimisation : mémoriser le GUID par email côté Hippolyte.ai après le premier accès.
+
+Une URL de recherche directe existe également :
+`{base}/Search/RedirectToApplicantSearchResults?searchTerm=<email>`.
+
+### Structure d'une suggestion de recherche
+
+```
+[role='option']
+  └─ <a href="/Pages/Utils/RedirectionMenu.ashx?key=ApplicantView&id=<guid>">
+<a>Voir plus de candidats pour : <email></a>      ← HORS de [role='option']
+```
+
+Le lien « Voir plus de candidats » est un frère de l'option, pas un enfant : le sélecteur
+`[role='listbox'] [role='option']` ne le capture pas. Un repli sur `[role='listbox'] li`, lui, le
+prendrait — raison de plus pour garder le sélecteur le plus étroit en tête de liste.
+
+## FAILLE CRITIQUE : une action de workflow peut envoyer un courrier au candidat
+
+Constatée le 12/09/2026 en exécutant réellement le parcours du bot sur la fiche témoin.
+
+### Ce qui s'est passé
+
+Clic sur l'action **« Candidature à l'étude »**, choisie comme la plus anodine (elle figurait déjà
+dans l'historique de la candidature). Elle n'a PAS ouvert le formulaire d'événement, mais :
+
+```
+../Correspondence/ActionMailLanguageChoicePage.aspx
+    « Langue »  [English UK | Français]
+    [Annuler]  [Valider]
+```
+
+Un écran de choix de langue pour un **courrier au candidat**. Le bouton de validation est
+`btnSend` — *send*, envoyer.
+
+Aucun courrier n'a été envoyé : la modale a été annulée, et l'historique est resté à 6 événements.
+
+### Pourquoi c'était dangereux pour le bot
+
+```
+btnSend  id="...ButtonPlaceHolder1_ctl02_btnSend"  class="valid-button"  value="Valider"
+
+EVENT_SUBMIT = ["input[id$='btValidate']", "input.valid-button"]
+                 ↑ 0 match ici            ↑ MATCHE btnSend
+```
+
+`valid-button` est une classe **partagée par toutes les modales** du Back Office : elle dit qu'un
+bouton valide quelque chose, jamais *quoi*. Le repli sur cette classe désignait donc le bouton
+d'envoi d'un courrier réel à un candidat.
+
+Le bot n'aurait probablement pas cliqué — `wait_open()` attend l'iframe `JobApplicationChildEventEdit`,
+absente ici, et aurait fini en `SelectorNotFound`. Mais la protection était **accidentelle**, et la
+modale serait restée ouverte, bloquant les actions suivantes.
+
+### Correctifs
+
+1. **`input.valid-button` retiré** de `EVENT_SUBMIT` et `ATTACHMENT_SUBMIT`. Ne valider que sur un
+   suffixe d'identifiant, qui identifie le formulaire.
+2. **Détection active** : `EventDialog.wait_open()` surveille `FORBIDDEN_DIALOG_FRAMES`
+   (`ActionMailLanguageChoicePage`, `Correspondence/`). Si un tel parcours s'ouvre, le bot **annule
+   la modale** et lève `MailDialogOpened`.
+3. Côté API, cela devient un échec d'action explicite :
+   `{"ok": false, "error": "event_type_sends_mail"}`, sans mutation.
+4. Deux tests de non-régression, dont un qui vérifie qu'aucun courrier n'est parti et que la modale
+   a bien été refermée.
+
+### Conséquence pour le paramétrage client
+
+**On ne peut pas deviner, depuis le libellé d'un type d'événement, s'il déclenche un courrier.**
+« Candidature à l'étude » semblait inoffensif et ne l'était pas. La liste des types « à courrier »
+est propre au paramétrage du tenant.
+
+Avant toute mise en production, faire valider par le client la liste des types utilisables par un
+automate. Le bot refuse désormais ceux qui ouvrent un parcours de courrier, mais il vaut mieux ne
+pas les demander du tout : l'échec survient après l'ouverture de la fiche, donc après avoir consommé
+un créneau navigateur.
+
+## Expiration de session : le tenant renvoie vers l'espace collaborateur
+
+Constatée en cours d'audit, après un long moment d'inactivité sur le Back Office.
+
+Un clic sur une action de workflow n'a pas produit de modale : le navigateur s'est retrouvé sur
+`testairfrance.talent-soft.com/MyTalentsoft#/Me`. Viser ensuite directement l'URL d'une fiche
+(`RedirectionMenu.ashx?key=ApplicantView&id=…`) a **encore** redirigé vers l'espace collaborateur.
+
+**Ce tenant ne montre donc pas de formulaire de login quand la session du Back Office expire.**
+
+### Pourquoi c'était un angle mort
+
+`open_application()` détectait l'expiration en cherchant un formulaire de login ou l'écran de choix
+de compte. Sur l'espace collaborateur, ni l'un ni l'autre : le bot se serait cru connecté, puis aurait
+échoué plus loin sur une barre de recherche introuvable — un symptôme qui ne désigne pas sa cause, et
+qui aurait coûté un long détour de diagnostic en production.
+
+### Correctif
+
+`_on_back_office()` vérifie l'**origine** de la page courante, et non la présence d'un marqueur :
+après navigation vers `TS_BASE_URL`, se retrouver sur un autre hôte signifie que la session est perdue.
+Le bot relance alors un login complet, et abandonne en `SessionExpired` si la seconde tentative échoue.
+
+Le contrôle par origine est ici plus sûr qu'un contrôle par marqueur : `#TSBody.ts-page`, par exemple,
+est présent **aussi** sur l'espace collaborateur, et aurait laissé passer le cas.
+
+## Actions du panneau Outils : un sous-ensemble, et des pièges
+
+Relevé sur la fiche témoin : **88 actions** dans le panneau, pour **105 types** dans le référentiel du
+formulaire. Deux conséquences vérifiées :
+
+1. **Un type peut n'avoir aucune action.** « Convocation à un entretien individuel » (code 837) existe
+   dans le select du formulaire et dans l'historique de la candidature, mais ne figure pas parmi les 88
+   actions. L'action ne sert donc qu'à **ouvrir** le formulaire ; le type se choisit ensuite dans la
+   liste déroulante, qui porte le référentiel complet. C'est ce que fait `open_from_workflow_action()`.
+
+2. **Le suffixe `EVENEMENT` semble distinguer les actions sans courrier.** Le tenant expose des paires :
+
+   | Action | Comportement |
+   | --- | --- |
+   | « Candidature à l'étude » | ouvre un **envoi de courrier** (vérifié) |
+   | « A l'étude EVENEMENT » | créerait l'événement seul |
+
+   Cinq actions portent ce suffixe : `Offre clôturée`, `A l'étude`, `En attente`, `KD Non payé`,
+   `KD Remboursé`. Le client a vraisemblablement dupliqué ses actions pour séparer les deux usages.
+   **À confirmer avec lui** : c'est la piste la plus sérieuse pour choisir `TS_DEFAULT_EVENT_TYPE`.
+
+Une seule action annonce explicitement l'absence d'envoi : « Invitation session (sans mail) ».
+
+## Création d'un événement : LE bon chemin (vérifié par écriture réelle, 12/09/2026)
+
+> **Rectification.** Une analyse précédente concluait qu'un événement avec commentaire exigeait deux
+> étapes (création par une action, puis modification). **C'est faux.** Un formulaire de création complet
+> existe ; il n'avait simplement pas été trouvé.
+
+### Le bouton est porté par la LIGNE de la candidature
+
+Le tableau d'historique expose, sur chaque ligne de candidature, quatre boutons en fin de ligne :
+
+| Bouton | Intitulé | Usage |
+| --- | --- | --- |
+| `btnDocumentReader` | Accès aux documents liés à la candidature | lecture |
+| `btnSendMailNew` | **Correspondre avec le candidat** | **envoie un courrier — à ne jamais cliquer** |
+| **`btnEventActionNew`** | **Effectuer une action sur la candidature** | **ouvre « Création d'un événement »** |
+| `btnEventDetailsNew` | Détails de la candidature | lecture |
+
+`btnEventActionNew` ouvre `JobApplicationChildEventEdit.aspx`, titre « **Création d'un événement** » :
+106 types, date, commentaire (`maxlength=2000`), « Suivi par ». **Un seul passage suffit.**
+
+Test réel : type « Convocation à un entretien individuel » (837), date 14/09/2026, commentaire saisi.
+Résultat en base, relu dans la vue de l'événement :
+
+```
+Créé le 12/09/2026 par Gauthier BAILLEUL
+Événement   Convocation à un entretien individuel
+Date        14/09/2026
+Suivi par   Gauthier BAILLEUL
+Motif       Hippolyte.ai : creation directe avec commentaire, test du 12/09/2026. A supprimer.
+```
+
+Ce bouton appartenant à la ligne de la candidature, **la cible est sans ambiguïté** : aucun risque
+d'écrire sur une autre candidature du même candidat.
+
+### Pourquoi les actions du panneau « Outils » ne conviennent pas
+
+Trois comportements distincts, tous constatés :
+
+| Action | Effet réel |
+| --- | --- |
+| « Candidature à l'étude » | ouvre un **envoi de courrier** (`ActionMailLanguageChoicePage`) |
+| « A l'étude EVENEMENT » | **crée l'événement immédiatement, sans proposer de commentaire** |
+| *(un formulaire de saisie)* | **aucune action n'en ouvre** |
+
+Le besoin métier étant « événement typé **avec commentaire** », aucune de ces actions ne convient.
+`WORKFLOW_ACTION_LINKS` reste déclaré pour le diagnostic, mais **le bot ne l'utilise plus**.
+
+### Le commentaire s'appelle « Motif », et il EST relisible
+
+Il n'apparaît pas dans la liste de l'historique, mais bien dans la **vue** de l'événement
+(`JobApplicationChildEventView.aspx`), ouverte en cliquant `lnkEventTitle`, sous le libellé « Motif ».
+
+Cela nuance le constat précédent : une vérification **forte** du commentaire est possible, au prix d'une
+ouverture de modale supplémentaire. `verification: "weak"` reste le comportement par défaut — la
+vérification forte serait une évolution, à arbitrer selon le coût acceptable par push.
+
+La vue expose aussi `btnDelete` (**Supprimer**) : le bot ne doit jamais le cliquer.
+
+### Piège : l'iframe navigue en interne
+
+En passant de la vue à l'édition (bouton « Modifier »), le document chargé devient `...Edit.aspx` alors
+que l'attribut `src` de l'iframe continue d'indiquer `...View.aspx`. Un sélecteur
+`iframe[src*='...Edit']` ne la trouve donc pas. `EVENT_DIALOG_FRAME` porte un second candidat plus large
+pour couvrir ce cas.

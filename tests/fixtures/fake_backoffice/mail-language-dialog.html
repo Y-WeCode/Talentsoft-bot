@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="fr">
+<head><meta charset="utf-8"><title>TS recrutement</title></head>
+<body>
+  <!-- Choix de langue d'un COURRIER AU CANDIDAT. Le bot ne doit jamais valider ici.
+       Noter que le bouton de validation porte la classe `valid-button`, la même que le
+       formulaire d'événement : c'est ce qui rendait un repli par classe dangereux. -->
+  <h1>Langue</h1>
+  <form>
+    <select id="ctl00_fieldContent_ddlLanguageSelect">
+      <option value="en">English UK</option>
+      <option value="fr" selected>Français</option>
+    </select>
+    <input type="submit" id="ctl00_ButtonContent_ButtonPlaceHolder1_ctl01_btnCancel"
+           class="cancel-button" value="Annuler">
+    <input type="submit" id="ctl00_ButtonContent_ButtonPlaceHolder1_ctl02_btnSend"
+           class="valid-button" value="Valider">
+  </form>
+<script>
+document.getElementById('ctl00_ButtonContent_ButtonPlaceHolder1_ctl02_btnSend')
+  .addEventListener('click', function (e) { e.preventDefault(); parent.__mailSent(); });
+document.getElementById('ctl00_ButtonContent_ButtonPlaceHolder1_ctl01_btnCancel')
+  .addEventListener('click', function (e) { e.preventDefault(); parent.__closeModal(); });
+</script>
+</body>
+</html>
