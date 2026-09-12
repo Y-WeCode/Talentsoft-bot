@@ -11,7 +11,9 @@ PDF = b"%PDF-1.4\n%fake\n"
 
 def test_requires_token(app_module):
     client = TestClient(app_module.app)
-    response = client.post("/update-application", data={"application_id": "1", "comment": "x"})
+    response = client.post(
+        "/update-application", data={"candidate_email": "candidat@example.com", "offer_id": "25152", "comment": "x"}
+    )
     assert response.status_code in (401, 403)
 
 
@@ -19,7 +21,7 @@ def test_previous_token_accepted_for_rotation(app_module, fake_bot):
     client = TestClient(app_module.app)
     response = client.post(
         "/update-application",
-        data={"application_id": "1", "comment": "x"},
+        data={"candidate_email": "candidat@example.com", "offer_id": "25152", "comment": "x"},
         headers={"Authorization": "Bearer old-token"},
     )
     assert response.status_code == 200
@@ -37,14 +39,18 @@ def test_update_application_success_contract(app_module, fake_bot):
     client = TestClient(app_module.app)
     response = client.post(
         "/update-application",
-        data={"application_id": "12345", "comment": "Résultat Hippolyte.ai", "event_type": "Commentaire"},
+        data={
+            "candidate_email": "candidat@example.com",
+            "offer_id": "25152",
+            "comment": "Résultat Hippolyte.ai",
+            "event_type": "Commentaire",
+        },
         headers=AUTH,
     )
     assert response.status_code == 200
     body = response.json()
     assert body["success"] is True
-    assert body["update_details"]["application_id"] == "12345"
-    assert body["update_details"]["application_url"].startswith("https://tenant.talent-soft.com/")
+    assert body["update_details"]["offer_id"] == "25152"
     assert fake_bot.last_kwargs["comment"] == "Résultat Hippolyte.ai"
     assert fake_bot.closed is False
 
@@ -53,7 +59,11 @@ def test_update_application_success_false_when_action_fails(app_module, monkeypa
     bot = FakeBot(actions={"event": {"ok": False, "error": "event_failed"}})
     monkeypatch.setattr(app_module.session_manager, "get_bot", lambda: bot)
     client = TestClient(app_module.app)
-    response = client.post("/update-application", data={"application_id": "1", "comment": "x"}, headers=AUTH)
+    response = client.post(
+        "/update-application",
+        data={"candidate_email": "candidat@example.com", "offer_id": "25152", "comment": "x"},
+        headers=AUTH,
+    )
     assert response.status_code == 200
     assert response.json()["success"] is False
 
@@ -69,7 +79,7 @@ def test_skipped_counts_as_success_including_document_lists(app_module, monkeypa
     client = TestClient(app_module.app)
     response = client.post(
         "/update-application",
-        data={"application_id": "1", "comment": "x", "idempotency_key": "abc"},
+        data={"candidate_email": "candidat@example.com", "offer_id": "25152", "comment": "x", "idempotency_key": "abc"},
         files=[("documents", ("synthese.pdf", io.BytesIO(PDF), "application/pdf"))],
         headers=AUTH,
     )
@@ -84,7 +94,7 @@ def test_unverified_document_fails_success(app_module, monkeypatch):
     client = TestClient(app_module.app)
     response = client.post(
         "/update-application",
-        data={"application_id": "1"},
+        data={"candidate_email": "candidat@example.com", "offer_id": "25152"},
         files=[("documents", ("cv.pdf", io.BytesIO(PDF), "application/pdf"))],
         headers=AUTH,
     )
@@ -96,39 +106,53 @@ def test_unverified_document_fails_success(app_module, monkeypatch):
 
 def test_rejects_when_nothing_to_do(app_module, fake_bot):
     client = TestClient(app_module.app)
-    response = client.post("/update-application", data={"application_id": "1"}, headers=AUTH)
+    response = client.post(
+        "/update-application", data={"candidate_email": "candidat@example.com", "offer_id": "25152"}, headers=AUTH
+    )
     assert response.status_code == 400
     assert fake_bot.update_calls == 0
 
 
-def test_rejects_foreign_application_url(app_module, fake_bot):
+def test_rejects_invalid_candidate_email(app_module, fake_bot):
+    """Un email malforme ne doit jamais partir dans la recherche du Back Office."""
     client = TestClient(app_module.app)
     response = client.post(
         "/update-application",
-        data={"application_url": "https://evil.example.com/app/1", "comment": "x"},
+        data={"candidate_email": "pas-un-email", "offer_id": "25152", "comment": "x"},
         headers=AUTH,
     )
     assert response.status_code == 400
     assert fake_bot.update_calls == 0
 
 
-def test_accepts_same_origin_application_url(app_module, fake_bot):
+def test_rejects_invalid_offer_id(app_module, fake_bot):
     client = TestClient(app_module.app)
     response = client.post(
         "/update-application",
-        data={"application_url": "https://tenant.talent-soft.com/recruiting/applications/987", "comment": "x"},
+        data={"candidate_email": "candidat@example.com", "offer_id": "../../etc", "comment": "x"},
+        headers=AUTH,
+    )
+    assert response.status_code == 400
+    assert fake_bot.update_calls == 0
+
+
+def test_passes_email_and_offer_to_bot(app_module, fake_bot):
+    client = TestClient(app_module.app)
+    response = client.post(
+        "/update-application",
+        data={"candidate_email": "candidat@example.com", "offer_id": "25152", "comment": "x"},
         headers=AUTH,
     )
     assert response.status_code == 200
-    assert fake_bot.last_kwargs["application_url"] == "https://tenant.talent-soft.com/recruiting/applications/987"
-    assert fake_bot.last_kwargs["application_id"] == "987"
+    assert fake_bot.last_kwargs["candidate_email"] == "candidat@example.com"
+    assert fake_bot.last_kwargs["offer_id"] == "25152"
 
 
 def test_rejects_file_with_wrong_magic_bytes(app_module, fake_bot):
     client = TestClient(app_module.app)
     response = client.post(
         "/update-application",
-        data={"application_id": "1"},
+        data={"candidate_email": "candidat@example.com", "offer_id": "25152"},
         files=[("documents", ("malware.pdf", io.BytesIO(b"MZ\x90\x00 not a pdf"), "application/pdf"))],
         headers=AUTH,
     )
@@ -140,7 +164,7 @@ def test_rejects_disallowed_extension(app_module, fake_bot):
     client = TestClient(app_module.app)
     response = client.post(
         "/update-application",
-        data={"application_id": "1"},
+        data={"candidate_email": "candidat@example.com", "offer_id": "25152"},
         files=[("documents", ("script.exe", io.BytesIO(b"MZ"), "application/octet-stream"))],
         headers=AUTH,
     )
@@ -150,21 +174,37 @@ def test_rejects_disallowed_extension(app_module, fake_bot):
 def test_comment_too_long_rejected(app_module, fake_bot, monkeypatch):
     monkeypatch.setenv("COMMENT_MAX_CHARS", "10")
     client = TestClient(app_module.app)
-    response = client.post("/update-application", data={"application_id": "1", "comment": "x" * 11}, headers=AUTH)
+    response = client.post(
+        "/update-application",
+        data={"candidate_email": "candidat@example.com", "offer_id": "25152", "comment": "x" * 11},
+        headers=AUTH,
+    )
     assert response.status_code == 400
 
 
 def test_invalid_event_date_rejected(app_module, fake_bot):
     client = TestClient(app_module.app)
     response = client.post(
-        "/update-application", data={"application_id": "1", "comment": "x", "event_date": "12/09/2026"}, headers=AUTH
+        "/update-application",
+        data={
+            "candidate_email": "candidat@example.com",
+            "offer_id": "25152",
+            "comment": "x",
+            "event_date": "12/09/2026",
+        },
+        headers=AUTH,
     )
     assert response.status_code == 400
 
 
 def test_sync_idempotency_replays_without_second_mutation(app_module, fake_bot):
     client = TestClient(app_module.app)
-    data = {"application_id": "1", "comment": "same", "idempotency_key": "push-42"}
+    data = {
+        "candidate_email": "candidat@example.com",
+        "offer_id": "25152",
+        "comment": "same",
+        "idempotency_key": "push-42",
+    }
     first = client.post("/update-application", data=data, headers=AUTH)
     second = client.post("/update-application", data=data, headers=AUTH)
     assert first.status_code == 200 and second.status_code == 200
@@ -175,7 +215,12 @@ def test_sync_idempotency_replays_without_second_mutation(app_module, fake_bot):
 
 def test_sync_idempotency_derived_from_content(app_module, fake_bot):
     client = TestClient(app_module.app)
-    data = {"application_id": "1", "comment": "same content", "event_type": "Commentaire"}
+    data = {
+        "candidate_email": "candidat@example.com",
+        "offer_id": "25152",
+        "comment": "same content",
+        "event_type": "Commentaire",
+    }
     client.post("/update-application", data=data, headers=AUTH)
     client.post("/update-application", data=data, headers=AUTH)
     client.post("/update-application", data={**data, "comment": "other"}, headers=AUTH)
@@ -188,12 +233,12 @@ def test_idempotency_key_released_when_mutation_did_not_start(app_module, monkey
     class NotFoundBot(FakeBot):
         def update_application(self, **kwargs):
             self.update_calls += 1
-            raise ApplicationNotFound(kwargs["application_url"])
+            raise ApplicationNotFound(kwargs["offer_id"])
 
     bot = NotFoundBot()
     monkeypatch.setattr(app_module.session_manager, "get_bot", lambda: bot)
     client = TestClient(app_module.app)
-    data = {"application_id": "1", "comment": "x", "idempotency_key": "k1"}
+    data = {"candidate_email": "candidat@example.com", "offer_id": "25152", "comment": "x", "idempotency_key": "k1"}
     assert client.post("/update-application", data=data, headers=AUTH).status_code == 404
     assert client.post("/update-application", data=data, headers=AUTH).status_code == 404
     assert bot.update_calls == 2
@@ -212,7 +257,11 @@ def test_browser_fatal_mid_job_invalidates_without_replay(app_module, monkeypatc
     monkeypatch.setattr(app_module.session_manager, "get_bot", lambda: bot)
     monkeypatch.setattr(app_module.session_manager, "invalidate", lambda reason="": invalidations.append(reason))
     client = TestClient(app_module.app)
-    response = client.post("/update-application", data={"application_id": "1", "comment": "x"}, headers=AUTH)
+    response = client.post(
+        "/update-application",
+        data={"candidate_email": "candidat@example.com", "offer_id": "25152", "comment": "x"},
+        headers=AUTH,
+    )
     assert response.status_code == 500
     assert response.json() == {"detail": "Erreur interne du serveur"}
     assert bot.update_calls == 1
@@ -228,7 +277,11 @@ def test_degraded_session_returns_503_without_login(app_module, monkeypatch):
     monkeypatch.setattr(app_module.session_manager, "get_bot", degraded)
     monkeypatch.setattr(app_module.session_manager, "is_degraded", lambda: True)
     client = TestClient(app_module.app)
-    response = client.post("/update-application", data={"application_id": "1", "comment": "x"}, headers=AUTH)
+    response = client.post(
+        "/update-application",
+        data={"candidate_email": "candidat@example.com", "offer_id": "25152", "comment": "x"},
+        headers=AUTH,
+    )
     assert response.status_code == 503
     assert "Retry-After" in response.headers
 
@@ -252,7 +305,9 @@ def test_session_reused_between_two_calls(app_module, monkeypatch):
     for _ in range(2):
         assert (
             client.post(
-                "/update-application", data={"application_id": "1", "comment": str(_)}, headers=AUTH
+                "/update-application",
+                data={"candidate_email": "candidat@example.com", "offer_id": "25152", "comment": str(_)},
+                headers=AUTH,
             ).status_code
             == 200
         )
@@ -267,7 +322,11 @@ def test_busy_returns_503_with_retry_after(app_module, fake_bot, monkeypatch):
     assert browser_lock.try_acquire(0.1)
     try:
         client = TestClient(app_module.app)
-        response = client.post("/applications/1/events", json={"comment": "x"}, headers=AUTH)
+        response = client.post(
+            "/applications/events",
+            json={"candidate_email": "candidat@example.com", "offer_id": "25152", "comment": "x"},
+            headers=AUTH,
+        )
     finally:
         browser_lock.release()
     assert response.status_code == 503
@@ -282,7 +341,11 @@ def test_admission_queue_full_returns_503(app_module, fake_bot, monkeypatch):
     assert browser_lock.try_admit()
     try:
         client = TestClient(app_module.app)
-        response = client.post("/applications/1/events", json={"comment": "x"}, headers=AUTH)
+        response = client.post(
+            "/applications/events",
+            json={"candidate_email": "candidat@example.com", "offer_id": "25152", "comment": "x"},
+            headers=AUTH,
+        )
         assert response.status_code == 503
         assert response.headers["Retry-After"] == "60"
     finally:
@@ -306,7 +369,11 @@ def test_health_answers_while_job_runs(app_module, monkeypatch):
     result = {}
 
     def call():
-        result["response"] = client.post("/applications/7/events", json={"comment": "x"}, headers=AUTH)
+        result["response"] = client.post(
+            "/applications/events",
+            json={"candidate_email": "candidat@example.com", "offer_id": "25152", "comment": "x"},
+            headers=AUTH,
+        )
 
     thread = threading.Thread(target=call)
     thread.start()
@@ -324,7 +391,11 @@ def test_health_answers_while_job_runs(app_module, monkeypatch):
 
 def test_async_mode_rejected_when_jobs_disabled(app_module, fake_bot):
     client = TestClient(app_module.app)
-    response = client.post("/update-application?async=1", data={"application_id": "1", "comment": "x"}, headers=AUTH)
+    response = client.post(
+        "/update-application?async=1",
+        data={"candidate_email": "candidat@example.com", "offer_id": "25152", "comment": "x"},
+        headers=AUTH,
+    )
     assert response.status_code == 400
     assert fake_bot.update_calls == 0
 
@@ -343,13 +414,14 @@ def test_async_mode_enqueues_and_returns_202(app_module, fake_bot, monkeypatch):
     client = TestClient(app_module.app)
     response = client.post(
         "/update-application?async=1",
-        data={"application_id": "1", "comment": "x", "idempotency_key": "k"},
+        data={"candidate_email": "candidat@example.com", "offer_id": "25152", "comment": "x", "idempotency_key": "k"},
         files=[("documents", ("cv.pdf", io.BytesIO(PDF), "application/pdf"))],
         headers=AUTH,
     )
     assert response.status_code == 202
     assert response.json() == {"job_id": "job-1", "status": "queued"}
-    assert captured["application_id"] == "1"
+    assert captured["candidate_email"] == "candidat@example.com"
+    assert captured["offer_id"] == "25152"
     assert len(captured["document_paths"]) == 1
     assert fake_bot.update_calls == 0
 
@@ -357,8 +429,14 @@ def test_async_mode_enqueues_and_returns_202(app_module, fake_bot, monkeypatch):
 def test_events_route_json(app_module, fake_bot):
     client = TestClient(app_module.app)
     response = client.post(
-        "/applications/55/events",
-        json={"event_type": "Entretien", "comment": "RAS", "event_date": "2026-09-12"},
+        "/applications/events",
+        json={
+            "candidate_email": "candidat@example.com",
+            "offer_id": "25152",
+            "event_type": "Entretien",
+            "comment": "RAS",
+            "event_date": "2026-09-12",
+        },
         headers=AUTH,
     )
     assert response.status_code == 200
@@ -368,13 +446,17 @@ def test_events_route_json(app_module, fake_bot):
 
 def test_documents_route_requires_file(app_module, fake_bot):
     client = TestClient(app_module.app)
-    response = client.post("/applications/55/documents", data={"document_category": "CV"}, headers=AUTH)
+    response = client.post("/applications/documents", data={"document_category": "CV"}, headers=AUTH)
     assert response.status_code in (400, 422)
 
 
 def test_list_events_read_only(app_module, fake_bot):
     client = TestClient(app_module.app)
-    response = client.get("/applications/55/events", headers=AUTH)
+    response = client.get(
+        "/applications/events",
+        params={"candidate_email": "candidat@example.com", "offer_id": "25152"},
+        headers=AUTH,
+    )
     assert response.status_code == 200
     assert response.json()["events"] == ["evenement 1"]
 
@@ -395,7 +477,7 @@ def test_jobs_route_hides_document_paths(app_module, monkeypatch):
             "id": job_id,
             "type": "update-application",
             "status": "queued",
-            "payload": {"document_paths": ["/x"], "application_id": "1"},
+            "payload": {"document_paths": ["/x"], "candidate_email": "candidat@example.com", "offer_id": "25152"},
         },
     )
     client = TestClient(app_module.app)

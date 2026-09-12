@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="fr">
+<head><meta charset="utf-8"><title>Sélectionner un compte - TalentSoft</title></head>
+<body>
+  <!-- Passerelle de fédération : écran intermédiaire avant le formulaire de l'IdP. -->
+  <h1>Sélectionnez le compte avec lequel vous souhaitez vous authentifier :</h1>
+  <form method="post" action="https://idp-fake.talent-soft.com/wsfed/issue">
+    <input type="hidden" name="__RequestVerificationToken" value="jeton">
+    <a href="#"><input type="radio" name="account" value="principal" id="acc1">
+      <h2><label for="acc1">Accès principal</label></h2></a>
+    <a href="#"><input type="radio" name="account" value="filiales" id="acc2">
+      <h2><label for="acc2">Accès pour les filiales</label></h2></a>
+    <button type="submit">Continuer</button>
+  </form>
+</body>
+</html>

@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="fr">
+<head><meta charset="utf-8"><title>TS recrutement</title></head>
+<body>
+  <h1>Création d'un événement</h1>
+  <div>Candidat : Candidat Test</div>
+  <form>
+    <select id="ctl00_fieldContent_ddlJobApplicationChildEventType" name="ctl00$fieldContent$ddlJobApplicationChildEventType">
+      <option value=""></option>
+      <option value="1329">A traiter</option>
+      <option value="1735">Candidature à l'étude</option>
+      <option value="1742">Entretien avis favorable</option>
+      <option value="4625">En attente</option>
+    </select>
+
+    <!-- Format Talentsoft : JJ/MM/AAAA, pré-rempli à aujourd'hui. -->
+    <input type="text" id="ctl00_ctl02_fieldContent_EventDate_EventDate_txt"
+           class="ts-date-picker__control" value="12/09/2026">
+
+    <!-- maxlength réel du tenant : 2000 caractères. -->
+    <textarea id="ctl00_EventEdit_fldTextComment_fieldContent_EventComment" maxlength="2000" rows="15"></textarea>
+
+    <select id="ctl00_ctl01_fieldContent_ddlSupervisor">
+      <option value="881307" selected>RECRUTEUR Test</option>
+    </select>
+
+    <input type="submit" id="ctl00_ButtonContent_ctl00_ctl01_btCancel" class="cancel-button" value="Annuler">
+    <input type="submit" id="ctl00_ButtonContent_ctl00_ctl02_btValidate" class="valid-button" value="Valider">
+  </form>
+<script>
+document.getElementById('ctl00_ButtonContent_ctl00_ctl02_btValidate').addEventListener('click', function (e) {
+  e.preventDefault();
+  var sel = document.getElementById('ctl00_fieldContent_ddlJobApplicationChildEventType');
+  var type = sel.options[sel.selectedIndex].text;
+  var d = document.getElementById('ctl00_ctl02_fieldContent_EventDate_EventDate_txt').value;
+  var c = document.getElementById('ctl00_EventEdit_fldTextComment_fieldContent_EventComment').value;
+  parent.__addEvent(type, d, c);
+});
+document.getElementById('ctl00_ButtonContent_ctl00_ctl01_btCancel').addEventListener('click', function (e) {
+  e.preventDefault();
+  parent.__closeModal();
+});
+</script>
+</body>
+</html>

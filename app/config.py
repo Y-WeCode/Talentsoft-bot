@@ -52,9 +52,38 @@ def ts_password() -> str:
     return env_str("TS_PASSWORD", "")
 
 
-def ts_application_url_template() -> str:
-    # Gabarit à confirmer en phase 0 (docs/DISCOVERY.md). Doit contenir {application_id}.
-    return env_str("TS_APPLICATION_URL_TEMPLATE", "{base}/Recruiting/BackOffice/Applications/{application_id}")
+def ts_auth_hosts() -> list[str]:
+    """Hôtes du parcours d'authentification fédérée, en plus de TS_BASE_URL.
+
+    Le tenant redirige vers une passerelle de fédération puis vers un IdP, sur deux domaines
+    distincts (docs/DISCOVERY.md). Sans cette allowlist, `_guard_route` coupe le login.
+    """
+    raw = env_str("TS_AUTH_HOSTS", "")
+    hosts = []
+    for item in raw.split(","):
+        host = item.strip().lower()
+        if host:
+            hosts.append(host)
+    return hosts
+
+
+def ts_account_choice() -> str:
+    """Libellé du compte à sélectionner sur l'écran de fédération (propre au tenant).
+
+    Vide : aucun écran de choix attendu, ou une seule option présente.
+    """
+    return env_str("TS_ACCOUNT_CHOICE", "")
+
+
+def ts_offer_url_template() -> str:
+    """Gabarit d'URL de la liste des candidatures d'une offre.
+
+    Doit contenir {offer_id}. {base} = TS_BASE_URL.
+    """
+    return env_str(
+        "TS_OFFER_URL_TEMPLATE",
+        "{base}/Pages/Offers/MainPage.aspx?FromContext=VacancyDashboard&id={offer_id}",
+    )
 
 
 def ts_default_event_type() -> str:
@@ -65,8 +94,13 @@ def ts_default_document_category() -> str:
     return env_str("TS_DEFAULT_DOCUMENT_CATEGORY", "")
 
 
-def ts_selftest_application_id() -> str:
-    return env_str("TS_SELFTEST_APPLICATION_ID", "")
+def ts_selftest_candidate_email() -> str:
+    """Email de la candidature témoin, utilisé par /selftest et la lecture des référentiels."""
+    return env_str("TS_SELFTEST_CANDIDATE_EMAIL", "")
+
+
+def ts_selftest_offer_id() -> str:
+    return env_str("TS_SELFTEST_OFFER_ID", "")
 
 
 # --- API ---------------------------------------------------------------------------
@@ -83,7 +117,15 @@ def enable_api_docs() -> bool:
 
 
 def comment_max_chars() -> int:
-    return env_int("COMMENT_MAX_CHARS", 4000, minimum=1)
+    """Limite du commentaire d'événement.
+
+    Le champ du Back Office porte maxlength=2000 : au-delà, le navigateur tronquerait
+    silencieusement. On refuse plutôt que de tronquer (docs/DISCOVERY.md).
+    La valeur configurée est plafonnée à la limite réelle du Back Office.
+    """
+    from .ts_selectors import EVENT_COMMENT_MAX_CHARS
+
+    return min(env_int("COMMENT_MAX_CHARS", EVENT_COMMENT_MAX_CHARS, minimum=1), EVENT_COMMENT_MAX_CHARS)
 
 
 def idempotency_ttl_seconds() -> int:

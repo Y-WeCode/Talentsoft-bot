@@ -75,8 +75,8 @@ def _enqueue(job_type: str, payload: dict[str, Any], queue: str, idempotency_key
 
 def enqueue_update_application(
     *,
-    application_id: str,
-    application_url: str,
+    candidate_email: str,
+    offer_id: str,
     event_type: str | None,
     comment: str | None,
     event_date: str | None,
@@ -85,8 +85,8 @@ def enqueue_update_application(
     idempotency_key: str | None,
 ) -> dict[str, Any]:
     payload = {
-        "application_id": application_id,
-        "application_url": application_url,
+        "candidate_email": candidate_email,
+        "offer_id": offer_id,
         "event_type": event_type,
         "comment": comment,
         "event_date": event_date,

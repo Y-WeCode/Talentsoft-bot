@@ -13,8 +13,14 @@ from fastapi import HTTPException
 
 from . import config
 
-DEFAULT_MAX_UPLOAD_SIZE_BYTES = 10 * 1024 * 1024
-DEFAULT_ALLOWED_UPLOAD_EXTENSIONS = {".pdf", ".doc", ".docx", ".odt", ".rtf", ".txt", ".png", ".jpg", ".jpeg"}
+# Limite affichée par le formulaire de dépôt du Back Office : 10240 Ko.
+DEFAULT_MAX_UPLOAD_SIZE_BYTES = 10240 * 1024
+
+# Extensions réellement acceptées par Talentsoft (relevé sur le tenant, docs/DISCOVERY.md) :
+# « les types de documents autorisés sont : .doc .rtf .docx .pdf .tif .tiff .xlsx .zip ».
+# Ni .odt, ni .txt, ni .png, ni .jpg : un fichier de ce type serait accepté par le bot puis
+# rejeté par Talentsoft, et le push échouerait après le début de la mutation.
+DEFAULT_ALLOWED_UPLOAD_EXTENSIONS = {".pdf", ".doc", ".docx", ".rtf", ".tif", ".tiff", ".xlsx", ".zip"}
 
 # Octets magiques par extension. Une extension absente ici n'est pas contrôlée (txt).
 MAGIC_BYTES_BY_EXTENSION: dict[str, tuple[bytes, ...]] = {
@@ -29,6 +35,10 @@ MAGIC_BYTES_BY_EXTENSION: dict[str, tuple[bytes, ...]] = {
 }
 
 APPLICATION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+OFFER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
+# Volontairement permissif : on ne cherche pas à valider la RFC 5322, seulement à écarter
+# ce qui ne peut pas être un email et ne doit pas partir dans une recherche Back Office.
+EMAIL_PATTERN = re.compile(r"^[^@\s]{1,128}@[^@\s]{1,128}\.[A-Za-z]{2,24}$")
 
 
 def get_max_upload_size_bytes() -> int:
@@ -57,6 +67,22 @@ def is_same_origin(url: str) -> bool:
     return parsed.scheme == "https" and parsed.netloc.lower() == expected_host() and bool(expected_host())
 
 
+def is_allowed_navigation(url: str) -> bool:
+    """Tenant, ou l'un des hôtes du parcours d'authentification fédérée.
+
+    Le login traverse une passerelle de fédération et un IdP hébergés sur d'autres domaines
+    (docs/DISCOVERY.md) : sans cette tolérance, la connexion est impossible. Tout le reste
+    demeure bloqué, pour que les cookies de session ne quittent pas ces hôtes.
+    """
+    if is_same_origin(url):
+        return True
+    parsed = urlparse(str(url))
+    if parsed.scheme != "https":
+        return False
+    host = parsed.netloc.lower()
+    return bool(host) and host in set(config.ts_auth_hosts())
+
+
 def validate_talentsoft_url(value: str) -> str:
     """N'accepte qu'une URL HTTPS sur l'hôte configuré par TS_BASE_URL."""
     if not is_same_origin(value):
@@ -65,38 +91,55 @@ def validate_talentsoft_url(value: str) -> str:
 
 
 def validate_application_id(value: str) -> str:
+    """Valide un identifiant applicatif Talentsoft.
+
+    Plus utilise par les routes : une candidature est designee par (email, offre), le Back
+    Office n'acceptant pas les identifiants de l'API Recruiting Customer (docs/DISCOVERY.md).
+    Conserve pour valider un identifiant recu d'un appelant tiers.
+    """
     value = (value or "").strip()
     if not APPLICATION_ID_PATTERN.match(value):
         raise HTTPException(status_code=400, detail="application_id invalide")
     return value
 
 
-def build_application_url(application_id: str) -> str:
-    template = config.ts_application_url_template()
-    if "{application_id}" not in template:
+def validate_offer_id(value: str) -> str:
+    value = (value or "").strip()
+    if not OFFER_ID_PATTERN.match(value):
+        raise HTTPException(status_code=400, detail="offer_id invalide")
+    return value
+
+
+def validate_candidate_email(value: str) -> str:
+    value = (value or "").strip()
+    if not EMAIL_PATTERN.match(value):
+        raise HTTPException(status_code=400, detail="candidate_email invalide")
+    return value
+
+
+def build_offer_url(offer_id: str) -> str:
+    template = config.ts_offer_url_template()
+    if "{offer_id}" not in template:
         raise HTTPException(status_code=500, detail="Erreur interne du serveur")
-    url = template.format(base=config.ts_base_url(), application_id=validate_application_id(application_id))
+    url = template.format(base=config.ts_base_url(), offer_id=validate_offer_id(offer_id))
     return validate_talentsoft_url(url)
 
 
-def resolve_application_url(application_id: str | None, application_url: str | None) -> tuple[str, str]:
-    """Retourne (application_id, url). L'URL explicite prime si elle est sur le tenant."""
-    if application_url:
-        url = validate_talentsoft_url(application_url)
-        app_id = validate_application_id(application_id) if application_id else _id_from_url(url)
-        return app_id, url
-    if not application_id:
-        raise HTTPException(status_code=400, detail="application_id ou application_url requis")
-    app_id = validate_application_id(application_id)
-    return app_id, build_application_url(app_id)
+def offer_reference_matches(row_text: str, offer_id: str) -> bool:
+    """Une ligne de candidature porte-t-elle la référence de l'offre visée ?
 
-
-def _id_from_url(url: str) -> str:
-    segments = [s for s in urlparse(url).path.split("/") if s]
-    for segment in reversed(segments):
-        if APPLICATION_ID_PATTERN.match(segment):
-            return segment
-    return "unknown"
+    Le Back Office affiche « Réponse à offre <intitulé> ( réf. <année>-<offerId> ) ».
+    L'année n'est pas dérivable de `offer_id` : on reconnaît le suffixe `-<offer_id>`,
+    délimité pour éviter qu'un identifiant court ne matche un numéro plus long
+    (`-152` ne doit pas matcher `2026-25152`).
+    """
+    offer_id = (offer_id or "").strip()
+    if not offer_id:
+        return False
+    normalized = re.sub(r"\s+", " ", row_text or "")
+    return (
+        re.search(rf"r.f\.\s*[A-Za-z0-9]*-?{re.escape(offer_id)}(?![0-9A-Za-z])", normalized, re.IGNORECASE) is not None
+    )
 
 
 def sanitize_comment(comment: str | None) -> str | None:

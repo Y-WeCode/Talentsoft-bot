@@ -1,6 +1,21 @@
 <!doctype html>
-<html lang="fr"><head><meta charset="utf-8"><title>Accueil</title></head>
-<body>
-<header><span class="user">Compte technique</span> <a href="/Account/LogOff">Se déconnecter</a></header>
-<h1>Tableau de bord recruteur</h1>
-</body></html>
+<html lang="fr">
+<head><meta charset="utf-8"><title>TS recrutement</title></head>
+<body class="theme-2017">
+  <div id="TSBody" class="ts-page">
+    <!-- Barre de recherche React/MUI : id et classes générés, on ne cible que le placeholder. -->
+    <input id="mui-99321" class="ds-hrecruiting-ts290" type="text"
+           placeholder="Rechercher un candidat, une offre ou une DAR">
+    <a href="/Home/Welcome">Accueil recrutement</a>
+    <a href="/VacancyDashboard">Offres</a>
+  </div>
+  <script>
+    // La recherche par email mène directement à la fiche du candidat unique.
+    document.querySelector('input[placeholder^="Rechercher"]').addEventListener('keydown', function (e) {
+      if (e.key !== 'Enter') return;
+      var term = (this.value || '').trim();
+      location.href = '/Pages/Applicants/MainPage.aspx?q=' + encodeURIComponent(term);
+    });
+  </script>
+</body>
+</html>

@@ -13,6 +13,9 @@ def app_module(monkeypatch, tmp_path):
     monkeypatch.setenv("TS_BASE_URL", "https://tenant.talent-soft.com")
     monkeypatch.setenv("TS_USERNAME", "bot@example.com")
     monkeypatch.setenv("TS_PASSWORD", "secret")
+    monkeypatch.setenv("TS_AUTH_HOSTS", "fedauth.talent-soft.com,idp.talent-soft.com")
+    monkeypatch.setenv("TS_SELFTEST_CANDIDATE_EMAIL", "temoin@example.com")
+    monkeypatch.setenv("TS_SELFTEST_OFFER_ID", "25152")
     monkeypatch.setenv("ENABLE_API_DOCS", "false")
     monkeypatch.setenv("BROWSER_RETRY_AFTER_SECONDS", "60")
     monkeypatch.delenv("REDIS_URL", raising=False)
@@ -52,14 +55,15 @@ class FakeBot:
         self.update_calls += 1
         self.last_kwargs = kwargs
         return {
-            "application_id": kwargs["application_id"],
-            "application_url": kwargs["application_url"],
+            "candidate_email_hash": "hash",
+            "offer_id": kwargs["offer_id"],
+            "application_label": "reponse a offre ( ref. 2026-25152)",
             "updated_at": "2026-01-01T00:00:00",
             "mutation_started": True,
             "actions": self._actions,
         }
 
-    def list_events(self, url):
+    def list_events(self, candidate_email, offer_id):
         return ["evenement 1"]
 
     def close(self):

@@ -9,10 +9,34 @@ ce que l'API Recruiting Customer ne permet pas :
 Même modèle que le DR bot (Digital Recruiters) : service indépendant, une instance par tenant, appelé en HTTP
 par Hippolyte.ai avec un token Bearer.
 
+## Comment une candidature est désignée
+
+**Point structurant, issu de la phase 0** (voir [docs/DISCOVERY.md](docs/DISCOVERY.md)) : le Back Office
+**n'accepte pas les identifiants de l'API Recruiting Customer**. Une fiche n'est adressable que par un
+identifiant interne (`applicantGuid`) dont Hippolyte.ai ne dispose pas, et tous les autres paramètres d'URL
+sont ignorés.
+
+Une candidature est donc désignée par le couple **email du candidat + identifiant de l'offre**, les deux
+seules données à la fois disponibles côté Hippolyte.ai et exploitables dans l'interface :
+
+```
+email → recherche globale du Back Office → le candidat
+offre → ligne « réf. <année>-<offer_id> » de son historique → la candidature
+```
+
+Garde-fous associés, non négociables :
+
+| Situation | Comportement |
+| --- | --- |
+| La recherche ne retourne **aucun** candidat | `404`, aucune mutation |
+| La recherche retourne **plusieurs** candidats | Refus : écrire sur le dossier d'un autre candidat serait une divulgation de données personnelles |
+| Le candidat n'a **pas postulé** à cette offre | `404`, aucune mutation |
+| La bonne candidature n'est pas active après sélection | Abandon **avant** toute mutation |
+
 ## Démarrage rapide
 
 ```bash
-cp .env.example .env        # renseigner TS_BASE_URL, TS_USERNAME, TS_PASSWORD, API_TOKEN
+cp .env.example .env        # renseigner TS_BASE_URL, TS_AUTH_HOSTS, TS_USERNAME, TS_PASSWORD, API_TOKEN
 docker compose up -d --build api
 curl http://127.0.0.1:42201/
 ```
@@ -31,13 +55,13 @@ Tous les endpoints métier exigent `Authorization: Bearer $API_TOKEN`.
 | Méthode | Route | Rôle |
 | --- | --- | --- |
 | `GET` | `/` | Healthcheck sans mutex : `browser_busy`, `browser_inflight`, `session_authenticated`, `degraded` |
-| `POST` | `/update-application?async=0|1` | Événement + pièces jointes en un appel (multipart) |
-| `POST` | `/applications/{id}/events` | Événement seul (JSON `{event_type, comment, event_date, idempotency_key}`) |
-| `POST` | `/applications/{id}/documents` | Pièces jointes seules (multipart `documents[]`, `document_category`) |
-| `GET` | `/applications/{id}/events` | Historique de la fiche, lecture seule (pour lever un `unverified`) |
+| `POST` | `/update-application?async=0\|1` | Événement + pièce jointe en un appel (multipart) |
+| `POST` | `/applications/events` | Événement seul (JSON) |
+| `POST` | `/applications/documents` | Pièce jointe seule (multipart) |
+| `GET` | `/applications/events?candidate_email=&offer_id=` | Historique de la candidature, lecture seule |
 | `GET` | `/referentials/event-types` | Types d'événement lus dans le Back Office (cache 1 h, candidature témoin) |
 | `GET` | `/referentials/document-categories` | Catégories de pièces jointes (idem) |
-| `POST` | `/selftest` | Lecture seule : login, fiche témoin, sélecteurs critiques. 503 si un sélecteur ne matche plus |
+| `POST` | `/selftest` | Lecture seule : login, candidature témoin, sélecteurs critiques. 503 si un sélecteur ne matche plus |
 | `POST` | `/admin/reset-session` | Sortie de l'état dégradé, fermeture de la session navigateur |
 | `GET` | `/jobs/{job_id}` | Statut d'un job async |
 
@@ -47,60 +71,81 @@ Champs multipart :
 
 | Champ | Description |
 | --- | --- |
-| `application_id` | Identifiant Talentsoft de la candidature (celui de `TalentsoftApplicationLink` côté Hippolyte.ai) |
-| `application_url` | Optionnel, prioritaire : URL de la fiche. Refusée si elle n'est pas sur `TS_BASE_URL` |
-| `event_type` | Libellé ou code du type d'événement. Défaut `TS_DEFAULT_EVENT_TYPE` |
-| `comment` | Commentaire de l'événement. Sans commentaire, aucun événement n'est créé |
-| `event_date` | `YYYY-MM-DD`, défaut aujourd'hui |
-| `documents` | 0..n fichiers (`pdf, doc, docx, odt, rtf, txt, png, jpg`), 10 Mo max chacun, contenu vérifié |
-| `document_category` | Libellé ou code de la catégorie. Défaut `TS_DEFAULT_DOCUMENT_CATEGORY` |
+| `candidate_email` | Email du candidat. Sert à le retrouver dans la recherche du Back Office |
+| `offer_id` | Identifiant de l'offre. Sert à choisir la bonne candidature du candidat |
+| `event_type` | Libellé du type d'événement. Défaut `TS_DEFAULT_EVENT_TYPE` |
+| `comment` | Commentaire de l'événement, **2000 caractères maximum**. Sans commentaire, aucun événement n'est créé |
+| `event_date` | `YYYY-MM-DD`, défaut aujourd'hui (converti en `JJ/MM/AAAA` pour le Back Office) |
+| `documents` | **0 ou 1** fichier (`pdf, doc, docx, rtf, tif, tiff, xlsx, zip`), 10 Mo max, contenu vérifié |
+| `document_category` | Libellé de la catégorie. Défaut `TS_DEFAULT_DOCUMENT_CATEGORY` |
 | `idempotency_key` | Clé fournie par l'appelant. Sinon dérivée du contenu |
 
 ```bash
 curl -sS -X POST http://127.0.0.1:42201/update-application \
   -H "Authorization: Bearer $API_TOKEN" \
-  -F application_id=12345 \
-  -F event_type="Commentaire" \
+  -F candidate_email="candidat@example.com" \
+  -F offer_id=25152 \
+  -F event_type="Candidature à l'étude" \
   -F comment="Hippolyte.ai : profil retenu, synthèse jointe" \
   -F documents=@synthese.pdf \
-  -F document_category="Autre" \
-  -F idempotency_key=push-12345-synthese-v1
+  -F document_category="Autres documents" \
+  -F idempotency_key=push-25152-synthese-v1
 ```
 
-Réponse (HTTP 200 dès que la fiche a été atteinte) :
+Réponse (HTTP 200 dès que la candidature a été atteinte) :
 
 ```json
 {
   "success": true,
   "update_details": {
-    "application_id": "12345",
-    "application_url": "https://tenant.talent-soft.com/...",
+    "candidate_email_hash": "a1b2c3d4e5f60718",
+    "offer_id": "25152",
+    "application_label": "agent d'escale commercial f/h ( réf. 2026-25152)",
     "updated_at": "2026-09-12T14:03:00",
     "mutation_started": true,
     "actions": {
-      "event": {"ok": true, "event_type": "Commentaire", "mutation_started": true, "verified": true},
+      "event": {"ok": true, "event_type": "Candidature à l'étude", "mutation_started": true,
+                "verified": true, "verification": "weak"},
       "documents": [
-        {"ok": true, "filename": "synthese.pdf", "category": "Autre", "mutation_started": true, "verified": true},
-        {"ok": true, "skipped": true, "reason": "already_present", "filename": "cv.pdf", "category": "CV"}
+        {"ok": true, "filename": "synthese.pdf", "category": "Autres documents",
+         "mutation_started": true, "verified": true}
       ]
     }
   }
 }
 ```
 
+L'email n'est jamais renvoyé en clair : seule son empreinte figure dans la réponse et dans les logs.
+
 `success` vaut `true` si toutes les actions ont `ok: true` (`skipped` compte comme succès).
 
-Résultats d'action possibles :
+### Résultats d'action
 
 | Résultat | Sens | Conduite côté Hippolyte.ai |
 | --- | --- | --- |
 | `{"ok": true, "verified": true}` | Mutation relue dans le Back Office | Terminé |
-| `{"ok": true, "skipped": true, "reason": "already_present"}` | Déjà présent, rien fait | Terminé |
-| `{"ok": false, "error": "event_failed" \| "upload_failed"}` | Échec avant clic de validation | Rejouer possible |
-| `{"ok": false, "error": "unverified", "mutation_may_have_happened": true}` | Clic effectué, relecture non confirmée | Statut indéterminé : relire `GET /applications/{id}/events` avant tout rejeu |
+| `{"ok": true, "skipped": true, "reason": "already_present"}` | Document déjà présent à l'identique | Terminé |
+| `{"ok": false, "error": "category_occupied"}` | **La catégorie contient déjà un document : déposer l'aurait détruit** | Choisir une autre catégorie, ou traiter à la main |
+| `{"ok": false, "error": "comment_too_long"}` | Commentaire au-delà de 2000 caractères | Raccourcir et rejouer, aucune mutation n'a eu lieu |
+| `{"ok": false, "error": "multiple_documents_same_category"}` | Plusieurs fichiers pour une seule catégorie | Un appel par document |
+| `{"ok": false, "error": "event_failed" \| "upload_failed"}` | Échec avant clic de validation | Rejeu possible |
+| `{"ok": false, "error": "unverified", "mutation_may_have_happened": true}` | Clic effectué, relecture non confirmée | Statut indéterminé : relire `GET /applications/events` avant tout rejeu |
 
-Codes HTTP : `400` validation, `401` token, `404` candidature introuvable, `409` requête identique en cours,
-`413` fichier trop volumineux, `503` + `Retry-After` navigateur occupé ou session dégradée, `500` générique.
+Codes HTTP : `400` validation, `401` token, `404` candidat ou candidature introuvable, `409` requête identique
+en cours, `413` fichier trop volumineux, `503` + `Retry-After` navigateur occupé ou session dégradée, `500` générique.
+
+### Deux limites du Back Office à connaître
+
+**1. Le commentaire d'un événement n'est pas relisible.** L'historique n'affiche que `type | date | auteur`.
+La vérification d'un événement est donc **faible** (`"verification": "weak"`) : elle confirme qu'un événement
+du bon type a été créé ce jour-là, pas que c'est exactement le nôtre. Conséquence : le bot **ne déduit jamais**
+qu'un événement est « déjà présent », car deux synthèses différentes du même jour seraient confondues et l'une
+serait silencieusement perdue. L'idempotence repose **entièrement** sur la clé d'idempotence.
+
+**2. Déposer une pièce jointe dans une catégorie occupée écrase le document existant**, sans avertissement, et
+le formulaire n'indique pas l'occupation. Le bot lit donc la liste des pièces jointes avant d'agir et **refuse**
+de déposer dans une catégorie occupée (`category_occupied`). Ce contrôle n'est pas configurable : remplacer une
+pièce d'un dossier candidat reste un geste de recruteur.
 
 ### Idempotence
 
@@ -118,11 +163,17 @@ l'en-tête `X-Idempotent-Replay: true`, sans toucher au Back Office. La clé est
 
 Voir `.env.example`. Points clés :
 
-- `TS_APPLICATION_URL_TEMPLATE` : gabarit d'URL d'une fiche, à confirmer en phase 0 (`docs/DISCOVERY.md`).
-- `TRACES_ENABLED=false` en production par défaut (les traces contiennent des données personnelles). En échec
-  uniquement, purge après `TRACES_RETENTION_DAYS`.
-- `LOGIN_MAX_FAILURES` / `LOGIN_FAILURE_WINDOW_SECONDS` : au-delà, état `degraded` visible sur `GET /`, plus aucune
-  tentative de login (protège le compte technique d'un verrouillage Talentsoft). Sortie : `make reset-session`.
+- `TS_BASE_URL` : l'hôte du **Back Office recrutement**, qui n'est pas celui sur lequel on atterrit après
+  authentification (celui-là est l'espace collaborateur).
+- `TS_AUTH_HOSTS` : **obligatoire**. L'authentification est fédérée et traverse deux autres domaines ; sans cette
+  allowlist, la navigation est bloquée et le bot ne peut pas se connecter.
+- `TS_ACCOUNT_CHOICE` : libellé du compte à sélectionner sur l'écran de fédération. Si plusieurs options existent
+  et que la valeur est vide, le bot refuse de deviner.
+- `TS_DEFAULT_EVENT_TYPE` : **à choisir avec le client**. Certains types déclenchent l'envoi d'un courrier au
+  candidat ; le type par défaut d'un bot ne doit jamais en être un.
+- `TRACES_ENABLED=false` en production par défaut (les traces contiennent des données personnelles).
+- `LOGIN_MAX_FAILURES` / `LOGIN_FAILURE_WINDOW_SECONDS` : au-delà, état `degraded`, plus aucune tentative de login
+  (protège le compte technique d'un verrouillage Talentsoft). Sortie : `make reset-session`.
 - `API_TOKEN_PREVIOUS` : rotation du token sans coupure.
 
 ### Compte technique Talentsoft
@@ -132,17 +183,26 @@ d'événements et de pièces jointes. Mot de passe sans expiration ou procédure
 `.env`, `docker compose restart api`). Les événements apparaîtront au nom de ce compte : préfixer les commentaires
 ("Hippolyte.ai : ...") si les recruteurs doivent distinguer l'origine.
 
+Vérifier que ce compte **voit les mêmes écrans** que celui utilisé pendant la phase 0 : les actions de workflow
+disponibles dépendent du rôle.
+
 ## Phase 0 : découverte sur le tenant
 
-Les sélecteurs de `app/ts_selectors.py` sont des gabarits validés sur un faux Back Office
-(`tests/fixtures/fake_backoffice`). Ils doivent être confirmés sur le tenant de recette :
+**Réalisée le 12/09/2026** sur le tenant de recette. Résultats dans :
+
+- [docs/DISCOVERY.md](docs/DISCOVERY.md) — parcours, sélecteurs, pièges et risques
+- [docs/event-types-airfrance.md](docs/event-types-airfrance.md) — 105 types d'événement (codes et libellés)
+- [docs/document-categories-airfrance.md](docs/document-categories-airfrance.md) — 46 catégories de pièces jointes
+
+Rejouer la découverte sur un autre tenant :
 
 ```bash
-make discover URL="https://<tenant>.talent-soft.com/<chemin d'une fiche>"
-# ou, avec écran : python tools/discover.py --headed --har --trace
+python tools/discover.py --out discovery --headed --har --trace
+# ou, sans écran : --login --dump --open "<url d'une fiche>"
 ```
 
-Consigner les constats dans `docs/DISCOVERY.md`, ajuster `ts_selectors.py`, puis `make selftest`.
+Les sélecteurs vivent dans `app/ts_selectors.py`, seul fichier à retoucher quand Cegid change l'interface.
+Après modification : `make selftest`.
 
 ## Développement
 
@@ -151,6 +211,11 @@ pip install -r requirements-dev.txt
 python -m playwright install chromium   # ou BROWSER_EXECUTABLE_PATH=/chemin/vers/chromium
 make test                                # ruff + pytest (unitaires + bout en bout sur faux Back Office)
 ```
+
+Le faux Back Office (`tests/fixtures/fake_backoffice`) reproduit la structure réelle : authentification fédérée
+en deux écrans, onglets Telerik, historique à deux niveaux, formulaires servis dans des iframes, `confirm()`
+natif, et le comportement d'écrasement des pièces jointes. Les tests bout en bout valident donc les sélecteurs
+et les garde-fous, pas seulement la mécanique Playwright.
 
 ## Exploitation
 
@@ -164,3 +229,6 @@ make test                                # ruff + pytest (unitaires + bout en bo
 Client HTTP côté Hippolyte.ai (`providers/talentsoft-bot.service.ts`, sur le modèle de `digital-recruiters.service.ts`),
 bascule du `TalentsoftAdapter` vers le bot pour les événements typés et les documents a posteriori, idempotence via
 `TalentsoftOutboundOperation`.
+
+Ce client devra fournir `candidate_email` et `offer_id`, et traiter explicitement `category_occupied` et
+`unverified` : ce sont les deux cas où une intervention humaine peut être nécessaire.
