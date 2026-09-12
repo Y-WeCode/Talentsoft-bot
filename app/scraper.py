@@ -29,6 +29,7 @@ import logging
 import os
 import shutil
 import time
+from contextlib import contextmanager
 from datetime import date, datetime
 from pathlib import Path
 
@@ -325,7 +326,10 @@ class TalentsoftBot:
             raise LoginError("login_form_not_found")
 
         logger.info("login_attempt")
-        login_page.submit_credentials(username, password)
+        # Observer la soumission : sans cela, un rejet serveur est indiscernable d'un clic
+        # sans effet — les deux laissent le formulaire affiché, sans message.
+        with self._watch_login_exchange():
+            login_page.submit_credentials(username, password)
         try:
             self.page.wait_for_load_state(
                 "networkidle", timeout=self.deadline.remaining_ms(config.navigation_timeout_ms())
@@ -344,8 +348,9 @@ class TalentsoftBot:
             self._dismiss_cookies()
             error_text = login_page.error_text()
             if error_text:
-                logger.warning("login_rejected")
-                raise LoginError("credentials_rejected")
+                logger.warning(f"login_rejected message={error_text[:120]!r}")
+                self.discard_storage_state()
+                raise LoginError(f"credentials_rejected: {error_text[:120]}")
             if login_page.is_authenticated_view():
                 landed = True
                 break
@@ -376,6 +381,62 @@ class TalentsoftBot:
         self._authenticated = True
         self.save_storage_state()
         logger.info("login_success")
+
+    @contextmanager
+    def _watch_login_exchange(self):
+        """Journalise la soumission du formulaire : champs envoyés, URL, statut de la réponse.
+
+        Ne sont relevés que les **noms** des champs postés, jamais leurs valeurs : le corps
+        contient le mot de passe. Ce relevé répond à trois questions qu'aucun autre signal ne
+        tranche — le POST part-il, porte-t-il les bons champs, et que répond le serveur ?
+        Un `200` qui réaffiche le formulaire dénonce un rejet silencieux (jeton anti-CSRF,
+        identifiants refusés sans message) ; l'absence de POST, un clic sans effet.
+        """
+
+        def on_request(request):
+            try:
+                if request.method != "POST" or not request.is_navigation_request():
+                    return
+                body = request.post_data or ""
+                fields = sorted({pair.split("=", 1)[0] for pair in body.split("&") if "=" in pair})
+                logger.info(f"login_post url={self._host_and_path(request.url)} champs={fields}")
+            except Exception:
+                pass
+
+        def on_response(response):
+            try:
+                if response.request.method != "POST" or not response.request.is_navigation_request():
+                    return
+                location = response.headers.get("location", "")
+                logger.info(
+                    f"login_response status={response.status} "
+                    f"url={self._host_and_path(response.url)} "
+                    f"redirige_vers={self._host_and_path(location) if location else 'aucune'}"
+                )
+            except Exception:
+                pass
+
+        self.page.on("request", on_request)
+        self.page.on("response", on_response)
+        try:
+            yield
+        finally:
+            try:
+                self.page.remove_listener("request", on_request)
+                self.page.remove_listener("response", on_response)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _host_and_path(url: str) -> str:
+        """Hôte et chemin seulement : les paramètres d'un échange SSO portent des jetons."""
+        try:
+            from urllib.parse import urlparse
+
+            parsed = urlparse(url or "")
+            return f"{parsed.netloc}{parsed.path}"[:110] or "?"
+        except Exception:
+            return "?"
 
     def _login_failure_hint(self, login_page: LoginPage) -> str:
         """Ce que la page dit au moment où le login n'aboutit pas.
@@ -442,6 +503,22 @@ class TalentsoftBot:
             if login_page.is_displayed() or login_page.is_authenticated_view():
                 return
             self.page.wait_for_timeout(300)
+
+    def discard_storage_state(self) -> None:
+        """Oublie la session persistée : la prochaine connexion repart d'un contexte vierge.
+
+        Un `storage_state` périmé porte des cookies d'une session antérieure — dont celui qui
+        accompagne le jeton anti-CSRF d'ASP.NET. S'il ne correspond plus au jeton du formulaire
+        fraîchement chargé, le serveur **réaffiche le formulaire sans message**, ce qui est
+        indiscernable d'un mot de passe refusé. On le supprime donc après un échec de login.
+        """
+        path = config.storage_state_path()
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+                logger.info("storage_state_discarded : prochaine connexion depuis un contexte vierge")
+        except OSError as error:
+            logger.warning(f"storage_state_discard_failed error={type(error).__name__}")
 
     def save_storage_state(self) -> None:
         if not self.context:

@@ -484,3 +484,49 @@ def test_user_agent_can_be_overridden(bot_env, monkeypatch):
         assert instance.page.evaluate("() => navigator.userAgent") == "Mozilla/5.0 (Test) AgentPersonnalise/1.0"
     finally:
         instance.close()
+
+
+def test_discarding_the_persisted_session_removes_the_file(bot_env):
+    """Un `storage_state` perime porte le cookie qui accompagne le jeton anti-CSRF.
+
+    S il ne correspond plus, le serveur reaffiche le formulaire SANS message — indiscernable
+    d un mot de passe refuse. Le jeter apres un echec evite de propager la panne.
+    """
+    import os
+
+    from app import config
+    from app.scraper import TalentsoftBot
+
+    instance = TalentsoftBot()
+    try:
+        os.makedirs(config.STATE_DIR, exist_ok=True)
+        with open(config.storage_state_path(), "w", encoding="utf-8") as handle:
+            handle.write('{"cookies": [], "origins": []}')
+        assert os.path.exists(config.storage_state_path())
+
+        instance.discard_storage_state()
+        assert not os.path.exists(config.storage_state_path())
+        # Idempotent : un second appel ne doit pas lever.
+        instance.discard_storage_state()
+    finally:
+        instance.close()
+
+
+def test_login_submits_even_when_the_button_does_nothing(bot_env):
+    """Le bouton « Connexion » de l IdP ne soumet pas : un autre geste doit prendre le relais.
+
+    Constate en production — la capture d ecran de l echec montrait les DEUX champs encore
+    renseignes, alors qu un POST rejete reaffiche la page avec le mot de passe vide.
+    """
+    from app.scraper import TalentsoftBot
+
+    instance = TalentsoftBot()
+    server = FakeServer()
+    server.install(instance.context)
+    try:
+        instance.ensure_logged_in()
+        # Le formulaire a bien ete soumis malgre le bouton neutralise.
+        assert server.credentials_posted is True
+        assert instance.is_authenticated()
+    finally:
+        instance.close()

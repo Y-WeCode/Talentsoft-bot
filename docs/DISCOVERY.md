@@ -1144,3 +1144,48 @@ légitime, sur un tenant dont l'exploitant demande cette automatisation.
 **Statut : à confirmer** par un selftest après redéploiement. Si l'échec persiste, l'erreur porte
 maintenant ce que la page affiche (`page=formulaire_toujours_affiché texte='…'`), et une capture est
 enregistrée quand `SCREENSHOTS_ENABLED=true`.
+
+## Le bouton « Connexion » ne soumet pas le formulaire
+
+**La capture d'écran de l'échec a tranché**, là où cinq hypothèses successives s'étaient révélées
+fausses. Au moment où le bot abandonne, la page montre :
+
+- `Nom d'utilisateur` : renseigné
+- `Mot de passe` : renseigné
+- aucun message d'erreur
+
+Or **un POST rejeté par ASP.NET réaffiche la page avec le mot de passe vidé**. Les deux champs
+encore saisis signifient donc que **la soumission n'est jamais partie**. Le bot remplissait
+correctement, puis cliquait dans le vide.
+
+### Hypothèses écartées en chemin
+
+| Hypothèse | Verdict |
+| --- | --- |
+| Mauvais compte sélectionné | faux — le compte technique dépend bien des filiales |
+| Formulaire différent selon l'accès | faux — identique, rejoué dans le navigateur |
+| Identifiants erronés | faux — connexion manuelle réussie |
+| `.env` altéré (troncature, quotes) | faux — longueurs conformes |
+| Jeton anti-CSRF périmé | plausible, mais démenti : un rejet CSRF viderait le mot de passe |
+| User-agent `HeadlessChrome` refusé | faux — le symptôme aurait été le même, mais le POST ne part pas du tout |
+
+### Correctif
+
+`submit_credentials` tente plusieurs gestes et **vérifie que la page a quitté le formulaire** :
+
+1. cliquer le bouton ;
+2. **`Entrée` dans le champ mot de passe** — le geste naturel, qui emprunte la soumission native
+   du navigateur plutôt que le gestionnaire du bouton ;
+3. `form.requestSubmit()` — qui déclenche la validation et l'événement `submit`, contrairement à
+   `form.submit()` qui les court-circuiterait.
+
+Le critère de réussite distingue les deux situations : formulaire disparu, ou réaffiché **avec le
+mot de passe vidé** (soumission partie, rejetée par le serveur — l'appelant le verra dans le message
+d'erreur). Un formulaire toujours renseigné signale au contraire un geste sans effet.
+
+### Ce que l'épisode enseigne sur ce Back Office
+
+C'est le troisième élément dont l'apparence trompe : radio invisible mais présent, iframe dont le
+`src` ment sur le document chargé, bouton qui semble actif mais ne soumet pas. **Ne jamais supposer
+qu'un geste a produit son effet : le vérifier.** Chaque cascade du code suit désormais ce principe,
+et journalise ce qui a fonctionné (`login_submitted_via=entree`).

@@ -16,5 +16,13 @@
     <button type="submit" class="btn btn-primary">Connexion</button>
   </form>
   <div class="validation-summary-errors" style="display:none">Identifiants incorrects</div>
+<script>
+  // Reproduit le comportement constate sur l'IdP du tenant : le clic sur le bouton ne
+  // declenche PAS la soumission. Entree et requestSubmit(), eux, fonctionnent.
+  window.__neutraliseBouton = true;
+  document.querySelector("button[type='submit']").addEventListener('click', function (e) {
+    e.preventDefault();
+  });
+</script>
 </body>
 </html>
