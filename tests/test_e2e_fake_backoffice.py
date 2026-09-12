@@ -20,6 +20,8 @@ import pytest
 FIXTURES = Path(__file__).parent / "fixtures" / "fake_backoffice"
 BASE = "https://fake.talent-soft.com"
 IDP = "https://idp-fake.talent-soft.com"
+# Espace collaborateur : le SSO y atterrit avant que le bot rejoigne le Back Office.
+LANDING = "https://landing-fake.talent-soft.com"
 
 
 def _chromium_available() -> bool:
@@ -55,6 +57,7 @@ class FakeServer:
         self.reset_session = False
         self.account_chosen = False
         self.credentials_posted = False
+        self.landed = False
         self.blocked: list[str] = []
 
     def install(self, context):
@@ -63,8 +66,10 @@ class FakeServer:
     def handle(self, route, request):
         url = request.url
         self.requests.append(url)
-        cookies = request.headers.get("cookie", "")
-        logged_in = "ts_session=1" in cookies and not self.reset_session
+        # La session est portée par l'état du serveur et non par un cookie : le parcours
+        # traverse plusieurs domaines, et un cookie posé sur l'hôte d'atterrissage ne vaudrait
+        # pas pour le Back Office. C'est le serveur d'identité qui fait foi, comme en réel.
+        logged_in = self.credentials_posted and not self.reset_session
 
         # Parcours fédéré, tel qu'observé : BASE -> choix du compte -> IdP -> retour BASE.
         if url.startswith(IDP):
@@ -76,6 +81,12 @@ class FakeServer:
             if "account=" in body:
                 self.account_chosen = True
             return route.fulfill(status=200, content_type="text/html", body=_page("login.html"))
+
+        if url.startswith(LANDING):
+            # Atterrissage post-SSO, hors Back Office : le bot doit le traverser sans conclure
+            # a un echec, puis naviguer de lui-meme vers TS_BASE_URL.
+            self.landed = True
+            return route.fulfill(status=200, content_type="text/html", body=_page("my-talentsoft.html"))
 
         if not url.startswith(BASE):
             self.blocked.append(url)
@@ -108,7 +119,7 @@ class FakeServer:
 def bot_env(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("TS_BASE_URL", BASE)
-    monkeypatch.setenv("TS_AUTH_HOSTS", "idp-fake.talent-soft.com")
+    monkeypatch.setenv("TS_AUTH_HOSTS", "idp-fake.talent-soft.com,landing-fake.talent-soft.com")
     monkeypatch.setenv("TS_USERNAME", "bot@example.com")
     monkeypatch.setenv("TS_PASSWORD", "secret")
     monkeypatch.setenv("TS_ACCOUNT_CHOICE", "Accès principal")
@@ -142,10 +153,22 @@ def _pdf(tmp_path: Path, name: str) -> str:
 
 
 def test_federated_login_traverses_account_choice_and_idp(bot):
-    """Le parcours à trois hôtes doit aboutir, sans quoi le bot ne peut rien faire."""
+    """Le parcours a quatre hotes doit aboutir, sans quoi le bot ne peut rien faire."""
     assert bot._server.account_chosen is True
     assert any(url.startswith(IDP) for url in bot._server.requests)
     assert bot.is_authenticated()
+
+
+def test_login_survives_landing_outside_the_back_office(bot):
+    """Le SSO atterrit sur l espace collaborateur, pas sur le Back Office.
+
+    Les marqueurs du Back Office n y matchent pas : conclure a un echec a cet instant ferait
+    rater un login reussi. Le bot doit traverser l atterrissage puis rejoindre TS_BASE_URL.
+    """
+    assert bot._server.landed is True, "l atterrissage hors Back Office n a pas eu lieu"
+    assert bot.is_authenticated()
+    # Et il termine bien sur le Back Office, pas sur l espace collaborateur.
+    assert bot.page.url.startswith(BASE)
 
 
 def test_navigation_outside_tenant_and_auth_hosts_is_blocked(bot):
@@ -333,3 +356,29 @@ def test_unknown_account_choice_fails_with_a_usable_message(bot_env, monkeypatch
         assert "compte-qui-n-existe-pas" in str(exc.value)
     finally:
         instance.close()
+
+
+def test_search_result_is_checked_against_the_requested_email(bot):
+    """Une suggestion portant une autre adresse ne doit jamais etre ouverte.
+
+    Ouvrir le dossier d un autre candidat serait une divulgation de donnees personnelles,
+    pas une simple erreur de ciblage.
+    """
+    from app.ts_pages import AmbiguousCandidate, GlobalSearch
+
+    bot.page.goto(BASE + "/", wait_until="domcontentloaded")
+    search = GlobalSearch(bot.page, bot.deadline, 5000)
+    search.search("quelquun.dautre@example.com")
+    # La suggestion du faux Back Office reprend le terme cherche : on demande une AUTRE
+    # adresse que celle affichee, le bot doit refuser plutot que cliquer.
+    with pytest.raises(AmbiguousCandidate):
+        search.open_single_result("candidat@example.com")
+
+
+def test_search_result_matching_the_email_is_opened(bot):
+    from app.ts_pages import GlobalSearch
+
+    bot.page.goto(BASE + "/", wait_until="domcontentloaded")
+    search = GlobalSearch(bot.page, bot.deadline, 5000)
+    search.search("candidat@example.com")
+    assert search.open_single_result("candidat@example.com") is True

@@ -9,12 +9,29 @@
     <a href="/Home/Welcome">Accueil recrutement</a>
     <a href="/VacancyDashboard">Offres</a>
   </div>
+  <!-- Suggestions de recherche : mêmes rôles ARIA que sur le tenant, et le libellé
+       porte l'adresse du candidat (« PAOLI Georges(Ref: 584408)email@exemple »). -->
+  <div id="suggestions" role="listbox" hidden></div>
   <script>
-    // La recherche par email mène directement à la fiche du candidat unique.
-    document.querySelector('input[placeholder^="Rechercher"]').addEventListener('keydown', function (e) {
-      if (e.key !== 'Enter') return;
-      var term = (this.value || '').trim();
-      location.href = '/Pages/Applicants/MainPage.aspx?q=' + encodeURIComponent(term);
+    var field = document.querySelector('input[placeholder^="Rechercher"]');
+    var box = document.getElementById('suggestions');
+
+    function suggest(term) {
+      box.innerHTML = '';
+      if (!term) { box.hidden = true; return; }
+      var li = document.createElement('li');
+      li.setAttribute('role', 'option');
+      li.textContent = 'CANDIDAT Test(Ref: 584408)' + term;
+      li.addEventListener('click', function () {
+        location.href = '/Pages/Applicants/MainPage.aspx?q=' + encodeURIComponent(term);
+      });
+      box.appendChild(li);
+      box.hidden = false;
+    }
+
+    field.addEventListener('input', function () { suggest((this.value || '').trim()); });
+    field.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') suggest((this.value || '').trim());
     });
   </script>
 </body>

@@ -53,10 +53,15 @@ def ts_password() -> str:
 
 
 def ts_auth_hosts() -> list[str]:
-    """Hôtes du parcours d'authentification fédérée, en plus de TS_BASE_URL.
+    """Hôtes traversés pendant l'authentification, en plus de TS_BASE_URL.
 
-    Le tenant redirige vers une passerelle de fédération puis vers un IdP, sur deux domaines
-    distincts (docs/DISCOVERY.md). Sans cette allowlist, `_guard_route` coupe le login.
+    Le tenant redirige vers une passerelle de fédération, puis vers un fournisseur d'identité,
+    puis **atterrit sur l'espace collaborateur** — trois domaines distincts de `TS_BASE_URL`
+    (docs/DISCOVERY.md). L'hôte d'atterrissage compte : c'est une navigation principale, et
+    sans lui `_guard_route` interrompt le parcours avant que la session soit ouverte.
+
+    Ne déclarer ici que des hôtes Talentsoft du tenant : cette liste est la seule brèche dans
+    le cloisonnement qui empêche les cookies de session de sortir du périmètre.
     """
     raw = env_str("TS_AUTH_HOSTS", "")
     hosts = []

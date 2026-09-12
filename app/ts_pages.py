@@ -201,7 +201,11 @@ def list_options(control: Locator) -> list[str]:
 
 
 class CookieBanner:
-    """Bandeau Didomi : il recouvre la page et intercepte les clics tant qu'il est ouvert."""
+    """Bandeau Didomi, ancré en bas de la fenêtre avec un z-index maximal.
+
+    Il ne recouvre pas toute la page, mais masque la bande basse : un contrôle situé là
+    devient incliquable. On le refuse une fois, au premier chargement.
+    """
 
     def __init__(self, page: Page, action_timeout_ms: int):
         self.page = page
@@ -420,21 +424,54 @@ class GlobalSearch:
         field.press("Enter", timeout=self._t())
 
     def result_items(self) -> list[Locator]:
+        """Suggestions de la recherche, débarrassées de tout ce qui n'en est pas une.
+
+        Le tenant monte son menu utilisateur avec les mêmes rôles ARIA que des suggestions :
+        « Changer de mot de passe », « Centre d'aide », **« Déconnexion »**. Cliquer cette
+        dernière en croyant ouvrir une fiche ferait perdre la session à chaque tentative.
+        Le filtre est donc appliqué ici, et pas seulement dans le sélecteur.
+        """
         for candidate in sel.SEARCH_RESULT_ITEMS:
             try:
                 locator = self.page.locator(candidate)
                 count = locator.count()
-                if count:
-                    return [locator.nth(index) for index in range(count)]
+                if not count:
+                    continue
+                items = []
+                for index in range(count):
+                    item = locator.nth(index)
+                    if self._is_excluded(item):
+                        continue
+                    items.append(item)
+                if items:
+                    return items
             except Exception:
                 continue
         return []
 
-    def open_single_result(self) -> bool:
+    def _is_excluded(self, item: Locator) -> bool:
+        try:
+            label = normalize_text(item.inner_text(timeout=2000))
+        except Exception:
+            return False
+        if not label:
+            return False
+        for forbidden in sel.SEARCH_RESULT_EXCLUDED_LABELS:
+            if forbidden in label:
+                logger.warning(f"search_result_ignored label={label[:40]!r} : entrée de menu, pas un candidat")
+                return True
+        return False
+
+    def open_single_result(self, expected_email: str = "") -> bool:
         """Ouvre l'unique résultat. False si la fiche s'est ouverte directement.
 
         Lève `AmbiguousCandidate` si plusieurs résultats : ne jamais deviner, écrire sur le
         dossier d'un autre candidat serait une divulgation de données personnelles.
+
+        Quand `expected_email` est fourni, la suggestion est confrontée à cet email avant
+        d'être ouverte. Le tenant affiche l'adresse dans le libellé
+        (« PAOLI Georges(Ref: 584408)bailleulg@gmail.com ») : cette vérification transforme un
+        clic de confiance en clic vérifié, pour un coût nul.
         """
         deadline = time.monotonic() + min(self._t(), 15000) / 1000.0
         while time.monotonic() < deadline:
@@ -442,12 +479,36 @@ class GlobalSearch:
                 return False
             items = self.result_items()
             if len(items) == 1:
+                self._assert_matches_email(items[0], expected_email)
                 items[0].click(timeout=self._t())
                 return True
             if len(items) > 1:
                 raise AmbiguousCandidate(f"{len(items)} résultats")
             self.page.wait_for_timeout(300)
         raise CandidateNotFound("aucun résultat de recherche")
+
+    def _assert_matches_email(self, item: Locator, expected_email: str) -> None:
+        """Refuse une suggestion qui porte une adresse différente de celle demandée.
+
+        Le libellé n'affiche pas toujours l'email : son absence n'est donc pas un motif de
+        refus. En revanche, une adresse **présente et différente** signale qu'on s'apprête à
+        ouvrir le dossier de quelqu'un d'autre.
+        """
+        if not expected_email:
+            return
+        try:
+            label = normalize_text(item.inner_text(timeout=3000))
+        except Exception:
+            return
+        wanted = normalize_text(expected_email)
+        if wanted in label:
+            return
+        found = re.findall(r"[^\s@]+@[^\s@]+\.[a-z]{2,}", label)
+        if found and not any(normalize_text(address) == wanted for address in found):
+            raise AmbiguousCandidate(
+                f"la suggestion porte une autre adresse que celle demandée "
+                f"({safety.short_hash(found[0])} vs {safety.short_hash(expected_email)})"
+            )
 
 
 class ApplicationPage:

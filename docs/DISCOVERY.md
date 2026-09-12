@@ -56,9 +56,11 @@ Formulaire de l'IdP (étape 3), relevé dans le DOM :
 - Atterrissage sur `https://testairfrance.talent-soft.com/MyTalentsoft#/Me` (« Mon Espace ») : application
   Angular à routes en hash, espace collaborateur. Le Back Office recruteur est sur l'**autre** hôte
   (`testairfrance-rh`) et reste accessible directement par URL : le bot n'a pas besoin de passer par MyTalentsoft.
-- **Bandeau de consentement Didomi** (`#didomi-notice`, conteneur `#didomi-host`) affiché par-dessus la page.
-  Il intercepte les clics tant qu'il n'est pas fermé : le bot devra le traiter au premier chargement
-  (refus des finalités non essentielles), sinon toutes les actions échoueront sur un élément masqué.
+- **Bandeau de consentement Didomi** (`#didomi-notice`, conteneur `#didomi-host`).
+  Mesuré le 12/09/2026 : 793 × 298 ancré en bas d'une fenêtre de 808 × 910, `z-index` maximal.
+  Il ne recouvre donc **pas** toute la page, contrairement à ce qui avait été noté d'abord, mais
+  masque la bande basse : un contrôle situé là devient incliquable. Le bot le refuse au premier
+  chargement (finalités non essentielles).
 - Aucun lien `logout`/`deconnexion` en clair dans le DOM à ce stade : les marqueurs `AUTHENTICATED_MARKERS`
   actuels (basés sur un lien de déconnexion) ne matchent pas. À remplacer par un marqueur fiable du Back Office.
 
@@ -713,3 +715,97 @@ docker-compose est une source d'ennuis inutile.
 que ce dépôt construit lui-même (`LoginError`, `SelectorNotFound`), dont les messages sont écrits sans
 secret par contrat. Une exception Playwright, qui peut porter une URL complète ou du HTML, ne propage
 toujours que son type.
+
+## Audit des sélecteurs en conditions réelles (12/09/2026)
+
+Parcours rejoué dans le navigateur, en testant à chaque écran les sélecteurs réels du bot.
+
+### Écran de choix de compte — conforme
+
+| Sélecteur | Constat |
+| --- | --- |
+| `ACCOUNT_CHOICE_RADIOS` | 2 trouvés, **0 visible** (`visibility: hidden`) |
+| `ACCOUNT_CHOICE_SUBMIT` | 1 visible |
+
+URL observée : `/hrd?wa=wsignin1.0&wtrealm=urn:oidc-relyingparty:...` — le tenant mêle WS-Fed et OIDC.
+`LOGIN_URL_FRAGMENTS` y détecte `signin` : le bot ne se croit pas authentifié sur cet écran.
+
+### Formulaire de l'IdP — conforme
+
+`LOGIN_USERNAME` (`input[name='Username']`), `LOGIN_PASSWORD`, `LOGIN_SUBMIT`
+(`button[type='submit'].btn-primary`) et `LOGIN_PAGE_MARKERS` matchent tous, visibles et actifs.
+
+### Bandeau de consentement — un sélecteur était DANGEREUX
+
+Le bandeau expose trois boutons de même facture :
+
+| id | Libellé |
+| --- | --- |
+| `didomi-notice-learn-more-button` | EN SAVOIR PLUS → |
+| **`didomi-notice-disagree-button`** | **REFUSER** |
+| `didomi-notice-agree-button` | ACCEPTER & FERMER |
+
+`#didomi-notice-disagree-button` est correct. Mais le second candidat de `COOKIE_REFUSE`,
+`button.didomi-button-standard`, matche **« EN SAVOIR PLUS »** : en cas de repli, le bot aurait ouvert un
+panneau en croyant refuser. Ce candidat a été retiré au profit d'un sélecteur par libellé.
+
+### Atterrissage post-SSO — BLOQUANT, corrigé
+
+Après authentification, le navigateur atterrit sur **`testairfrance.talent-soft.com/MyTalentsoft#/Me`**
+(espace collaborateur), et **non** sur le Back Office. Constats :
+
+- aucun marqueur de `AUTHENTICATED_MARKERS` n'y matche (`markers: []`, `search_input: 0`) ;
+- toute la session s'y poursuit (68 requêtes vers cet hôte).
+
+Deux conséquences, toutes deux fatales avant correction :
+
+1. `login()` attendait les marqueurs du Back Office sur cette page : un login **réussi** aurait été
+   déclaré en échec (`login_not_confirmed`) après 45 s.
+2. Cet hôte n'étant ni `TS_BASE_URL` ni un hôte d'authentification déclaré, **`_guard_route` aurait
+   bloqué la navigation d'atterrissage** et le parcours n'aurait jamais abouti.
+
+Correctifs :
+
+- `TS_AUTH_HOSTS` désigne désormais les hôtes **traversés pendant l'authentification, atterrissage
+  compris**. Pour ce tenant, trois valeurs sont nécessaires :
+  `testfedauthsbg1`, `testidpsbg1` **et `testairfrance`** (espace collaborateur).
+- `login()` distingue deux jalons : la **fin du parcours SSO** (`POST_LOGIN_MARKERS`, valable quelle que
+  soit l'application d'atterrissage), puis la **présence sur le Back Office**, obtenue en y naviguant
+  explicitement avant de conclure au succès.
+- Le faux Back Office reproduit cet atterrissage sur un hôte distinct, pour que les tests couvrent le cas.
+
+### Recherche par email — VALIDÉE sur le tenant
+
+Recherche de `bailleulg@gmail.com` depuis `/Home/Welcome` :
+
+```
+[role='listbox'] [role='option']  →  1 résultat
+libellé : « PAOLI Georges(Ref: 584408)bailleulg@gmail.com »
+actionable: true, non recouvert, aucune entrée de menu capturée
+```
+
+Le sélecteur prioritaire du bot est confirmé, et **l'unicité du résultat par email** l'est aussi.
+
+Deux enseignements supplémentaires :
+
+1. **Le libellé du résultat contient l'adresse.** `open_single_result()` la confronte désormais à
+   l'email demandé : une suggestion portant une **autre** adresse est refusée
+   (`AmbiguousCandidate`) au lieu d'être ouverte. L'absence d'adresse dans le libellé n'est pas
+   un motif de refus — seule une adresse présente et différente l'est.
+2. **`[role='menu'] [role='menuitem']` capturait le menu utilisateur** (« Changer de mot de passe »,
+   « Centre d'aide », « **Déconnexion** »). Ce candidat a été retiré, et un filtre d'exclusion par
+   libellé a été ajouté dans `GlobalSearch.result_items()` : cliquer « Déconnexion » en croyant ouvrir
+   une fiche aurait fait perdre la session à chaque tentative.
+
+### Viewport : la barre de recherche se replie en dessous de ~1000 px
+
+Constaté à 793 px de large : le champ de recherche passe sous un ancêtre en `display: none`, donc
+invisible et inutilisable. À 1280 px, il mesure 480 × 33 et redevient normal.
+
+La barre étant le **seul** chemin vers une fiche candidat, le contexte navigateur fixe désormais un
+viewport explicite de 1440 × 900, au lieu de s'en remettre au défaut de Playwright.
+
+### Accès direct au Back Office
+
+`{base}/Home/Welcome` ouvre directement l'accueil recrutement (titre « Accueil recrutement »), et les
+marqueurs `AUTHENTICATED_MARKERS` y matchent (`/Home/Welcome`, `/VacancyDashboard` visibles).

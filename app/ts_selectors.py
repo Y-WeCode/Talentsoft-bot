@@ -131,15 +131,35 @@ AUTHENTICATED_MARKERS = [
 
 # --- Bandeau de consentement (Didomi) -------------------------------------------------
 #
-# Affiché au premier chargement, il recouvre la page et intercepte tous les clics.
-# Le bot refuse les finalités non essentielles.
+# Affiché au premier chargement, ancré en BAS de la fenêtre (environ un tiers de la hauteur
+# sur le tenant), avec un z-index maximal. Il ne recouvre donc pas toute la page, mais masque
+# ce qui se trouve dans cette bande : un contrôle en bas d'écran devient incliquable.
+# Le bot refuse les finalités non essentielles dès le premier chargement.
 
 COOKIE_BANNER = ["#didomi-notice", "#didomi-host", ".didomi-popup-container"]
 
+# ATTENTION : ne lister ici que des sélecteurs qui désignent le REFUS.
+# Le bandeau du tenant expose trois boutons de même facture :
+#   #didomi-notice-learn-more-button  « EN SAVOIR PLUS »
+#   #didomi-notice-disagree-button    « REFUSER »            <- le seul acceptable
+#   #didomi-notice-agree-button       « ACCEPTER & FERMER »
+# Un sélecteur de classe générique (`button.didomi-button-standard`) attrape « EN SAVOIR
+# PLUS » : le bot croirait refuser tout en ouvrant un panneau. Cibler l'id, puis le libellé.
 COOKIE_REFUSE = [
     "#didomi-notice-disagree-button",
-    "role=button[name=/refuser|tout refuser|continuer sans accepter/i]",
-    "button.didomi-button-standard",
+    "role=button[name=/^\\s*refuser\\s*$|tout refuser|continuer sans accepter/i]",
+]
+
+# Signe que le parcours d'authentification fédérée est terminé, quelle que soit l'application
+# d'atterrissage. Le tenant renvoie vers MyTalentsoft (espace collaborateur) et NON vers le
+# Back Office : les marqueurs de celui-ci n'y matchent pas. Sans ce jalon intermédiaire, le
+# bot conclurait que le login a échoué alors qu'il vient de réussir.
+POST_LOGIN_MARKERS = [
+    "#TSBody",
+    "[href*='MyTalentsoft' i]",
+    "[class*='ts-page' i]",
+    "a.rtsLink",
+    "input[placeholder*='Rechercher' i]",
 ]
 
 # --- Recherche d'un candidat par email -------------------------------------------------
@@ -155,10 +175,26 @@ GLOBAL_SEARCH_INPUT = [
 ]
 
 # Résultats de la recherche globale (overlay React monté en portal).
+#
+# DANGER, constaté le 12/09/2026 : `[role='menu'] [role='menuitem']` attrape le **menu
+# utilisateur** de l'en-tête (« Changer de mot de passe », « Centre d'aide », « Déconnexion »).
+# Un sélecteur de résultats doit être assez étroit pour ne jamais désigner ces entrées :
+# cliquer « Déconnexion » en croyant ouvrir une fiche ferait perdre la session à chaque essai.
+# On s'en tient donc aux rôles de liste de suggestions, jamais aux menus.
 SEARCH_RESULT_ITEMS = [
-    "role=option",
+    "[role='listbox'] [role='option']",
+    "[role='option']",
     "[role='listbox'] li",
-    "[role='menu'] [role='menuitem']",
+]
+
+# Libellés du menu utilisateur : un « résultat » qui porte l'un d'eux n'en est pas un.
+# Garde-fou de dernier recours, si le tenant montait ses suggestions dans un menu.
+SEARCH_RESULT_EXCLUDED_LABELS = [
+    "déconnexion",
+    "deconnexion",
+    "changer de mot de passe",
+    "centre d'aide",
+    "centre d’aide",
 ]
 
 # --- Fiche candidature ---------------------------------------------------------------
