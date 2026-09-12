@@ -1,0 +1,119 @@
+# Talentsoft-bot : helpers ops. Doc intégrée : make help
+
+.DEFAULT_GOAL := help
+
+COMPOSE ?= docker compose
+PROFILE ?= --profile async
+API     ?= talentsoft_bot_api
+WORKER  ?= talentsoft_bot_worker
+BASE    ?= http://127.0.0.1:42201
+
+.PHONY: help up down deploy deploy-nocache restart ps health verify-code logs logs-worker \
+        traces shell-api test lint format selftest event job reset-session discover
+
+help:
+	@echo "Talentsoft-bot : ops helper"
+	@echo ""
+	@echo "Cycle de vie"
+	@echo "  make up              Démarrage (api seule, mode sync)"
+	@echo "  make deploy          Rebuild api + worker + redis (mode async)"
+	@echo "  make deploy-nocache  Build --no-cache puis up"
+	@echo "  make restart / ps / down"
+	@echo ""
+	@echo "Vérifs"
+	@echo "  make health          GET / sur $(BASE)"
+	@echo "  make selftest        POST /selftest (login + fiche témoin + sélecteurs critiques)"
+	@echo "  make verify-code     Même version de code dans api ET worker (piège image stale)"
+	@echo "  make logs / logs-worker / traces / shell-api"
+	@echo ""
+	@echo "Développement"
+	@echo "  make test            ruff + pytest (unitaires + bout en bout sur faux Back Office)"
+	@echo "  make lint / format"
+	@echo "  make discover URL=https://<tenant>.talent-soft.com/... Capture headless (login + dump DOM)"
+	@echo ""
+	@echo "API de test (token lu depuis .env, jamais affiché)"
+	@echo "  make event ID=<application_id> TYPE='Commentaire' COMMENT='Test Hippolyte.ai' [DOC=fichier.pdf]"
+	@echo "  make job ID=<job_id>"
+	@echo "  make reset-session   Sortie de l'état dégradé"
+
+up:
+	$(COMPOSE) up -d --build api
+
+down:
+	$(COMPOSE) $(PROFILE) down
+
+deploy:
+	$(COMPOSE) $(PROFILE) up -d --build api worker redis
+
+deploy-nocache:
+	$(COMPOSE) $(PROFILE) build --no-cache api worker
+	$(COMPOSE) $(PROFILE) up -d api worker redis
+
+restart:
+	$(COMPOSE) restart api
+	-$(COMPOSE) $(PROFILE) restart worker
+
+ps:
+	$(COMPOSE) $(PROFILE) ps -a
+
+health:
+	curl -m 5 $(BASE)/ ; echo
+
+verify-code:
+	@for c in $(API) $(WORKER); do \
+	  echo "== $$c =="; \
+	  docker exec $$c sh -c 'grep -c "def update_application" /app/app/scraper.py' 2>/dev/null || echo "conteneur absent"; \
+	  docker inspect $$c --format 'Created={{.Created}} Image={{.Image}}' 2>/dev/null || true; \
+	done
+
+logs:
+	docker logs -f --since 10m $(API)
+
+logs-worker:
+	docker logs -f --since 10m $(WORKER)
+
+traces:
+	ls -lt traces 2>/dev/null | head || echo "pas de traces/"
+
+shell-api:
+	docker exec -it $(API) /bin/sh
+
+lint:
+	ruff check . && ruff format --check .
+
+format:
+	ruff format . && ruff check --fix .
+
+test: lint
+	pytest -q
+
+selftest:
+	@TOKEN=$$(grep '^API_TOKEN=' .env | cut -d= -f2- | sed 's/^["'\'']//;s/["'\'']$$//') ; \
+	curl -sS -X POST "$(BASE)/selftest" -H "Authorization: Bearer $$TOKEN" ; echo
+
+reset-session:
+	@TOKEN=$$(grep '^API_TOKEN=' .env | cut -d= -f2- | sed 's/^["'\'']//;s/["'\'']$$//') ; \
+	curl -sS -X POST "$(BASE)/admin/reset-session" -H "Authorization: Bearer $$TOKEN" ; echo
+
+# make event ID=123 TYPE='Commentaire' COMMENT='Test' [DOC=synthese.pdf]
+event:
+ifndef ID
+	$(error Usage: make event ID=<application_id> COMMENT='...' [TYPE='Commentaire'] [DOC=fichier.pdf])
+endif
+	@TOKEN=$$(grep '^API_TOKEN=' .env | cut -d= -f2- | sed 's/^["'\'']//;s/["'\'']$$//') ; \
+	curl -sS -X POST "$(BASE)/update-application" \
+	  -H "Authorization: Bearer $$TOKEN" \
+	  -F "application_id=$(ID)" \
+	  $(if $(TYPE),-F "event_type=$(TYPE)",) \
+	  $(if $(COMMENT),-F "comment=$(COMMENT)",) \
+	  $(if $(DOC),-F "documents=@$(DOC)",) ; echo
+
+job:
+ifndef ID
+	$(error Usage: make job ID=<job_id>)
+endif
+	@TOKEN=$$(grep '^API_TOKEN=' .env | cut -d= -f2- | sed 's/^["'\'']//;s/["'\'']$$//') ; \
+	curl -sS "$(BASE)/jobs/$(ID)" -H "Authorization: Bearer $$TOKEN" ; echo
+
+discover:
+	python tools/discover.py --out discovery --login --dump $(if $(URL),--open "$(URL)",)
