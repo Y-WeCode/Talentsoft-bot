@@ -240,9 +240,15 @@ DOCUMENTS_TAB = [
 #   tr.ch_content_outerrep  une candidature — texte « Réponse à offre <intitulé> ( réf. <référence> ) »
 #   tr.trChildrenEvent      les événements de la candidature développée
 #
-# ATTENTION : `tr.selectedLine` n'est PAS fiable — la classe disparaît après un postback.
-# Pour cibler une candidature, se fier à l'ordre du DOM : les `trChildrenEvent` d'une
-# candidature suivent sa ligne `ch_content_outerrep`, jusqu'à la `ch_content_outerrep` suivante.
+# ORDRE OBLIGATOIRE : tant qu'aucune candidature n'est sélectionnée, les lignes d'événement
+# sont dans le DOM mais en `display: none`, et les actions de workflow du panneau Outils ne
+# sont PAS chargées du tout. Le postback de sélection (clic sur `lnkOfferLabel`) déplie les
+# premières et charge les secondes. Sélectionner d'abord, agir ensuite.
+#
+# `tr.selectedLine` marque la candidature sélectionnée : absent au chargement de la fiche et
+# après un postback de mutation, présent après une sélection explicite — ce que le bot fait
+# toujours. On s'en sert donc comme preuve directe, avec l'ordre du DOM en second recours
+# (les `trChildrenEvent` d'une candidature suivent sa ligne, jusqu'à la suivante).
 
 APPLICATIONS_HISTORY_TABLE = ["table.events-history-table", "table.result-grid-view"]
 

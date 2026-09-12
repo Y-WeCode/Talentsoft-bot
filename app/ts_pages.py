@@ -536,11 +536,15 @@ class ApplicationPage:
         tab.click(timeout=self._t())
         self._wait_postback(sel.APPLICATIONS_HISTORY_TABLE)
 
-    def _wait_postback(self, expected: Iterable[str]) -> None:
-        """Attend la fin d'un postback : l'URL ne change pas, seul le DOM bouge."""
+    def _wait_postback(self, expected: Iterable[str], *, require_visible: bool = False) -> None:
+        """Attend la fin d'un postback : l'URL ne change pas, seul le DOM bouge.
+
+         compte : le Back Office laisse dans le DOM des lignes repliees en
+        , dont la presence ne prouve aucun changement d'etat.
+        """
         deadline = time.monotonic() + min(self._t(), 20000) / 1000.0
         while time.monotonic() < deadline:
-            if any_present(self.page, expected, require_visible=False):
+            if any_present(self.page, expected, require_visible=require_visible):
                 return
             self.page.wait_for_timeout(250)
         raise SelectorNotFound("postback sans effet observable")
@@ -574,21 +578,35 @@ class ApplicationPage:
         text, link = matches[0]
         link.click(timeout=self._t())
         self.page.wait_for_timeout(500)
+        # Le postback de sélection déplie les événements ET charge les actions de workflow du
+        # panneau Outils : avant lui, ni les uns ni les autres ne sont exploitables. On attend
+        # donc des lignes d'événement VISIBLES — leur simple présence dans le DOM ne prouve
+        # rien, elles y sont déjà en `display: none` quand la candidature est repliée.
         try:
-            self._wait_postback(sel.EVENT_ROWS)
+            self._wait_postback(sel.EVENT_ROWS, require_visible=True)
         except SelectorNotFound:
-            # Une candidature sans aucun événement est légitime.
-            logger.info("aucune ligne d'événement après sélection de la candidature")
+            # Une candidature sans aucun événement est légitime : rien à déplier.
+            logger.info("aucune ligne d'événement visible après sélection de la candidature")
         if not self.selected_offer_matches(offer_id):
             raise ApplicationNotOnOffer(f"candidature {offer_id} non active après sélection")
         return normalize_text(text)[:120]
 
     def selected_offer_matches(self, offer_id: str) -> bool:
-        """Garde-fou avant toute mutation : la candidature développée est-elle la bonne ?
+        """Garde-fou avant toute mutation : la candidature active est-elle la bonne ?
 
-        `tr.selectedLine` n'étant pas fiable (la classe disparaît après un postback), on se
-        fonde sur l'ordre du DOM : les lignes d'événement suivent la ligne de leur candidature.
+        Deux preuves, de la plus directe à la plus structurelle :
+
+        1. `tr.selectedLine` porte la référence de l'offre. Le Back Office pose cette classe
+           sur la candidature sélectionnée — elle est absente au chargement de la fiche et
+           après un postback de mutation, mais présente après une sélection explicite, qui est
+           toujours ce que fait le bot.
+        2. À défaut, l'ordre du DOM : les lignes d'événement suivent la ligne de leur
+           candidature, jusqu'à la candidature suivante.
         """
+        selected = self._selected_row_text()
+        if selected is not None:
+            return safety.offer_reference_matches(selected, offer_id)
+
         rows = self._history_rows()
         if not rows:
             return False
@@ -602,6 +620,16 @@ class ApplicationPage:
                 # Des événements sont rattachés à une AUTRE candidature : mauvaise cible.
                 return False
         return saw_target
+
+    def _selected_row_text(self) -> str | None:
+        """Texte de la ligne marquée sélectionnée, ou None si le Back Office n'en marque aucune."""
+        try:
+            locator = self.page.locator(sel.SELECTED_APPLICATION_ROW[0])
+            if locator.count() != 1:
+                return None
+            return locator.first.inner_text(timeout=3000)
+        except Exception:
+            return None
 
     def _history_rows(self) -> list[tuple[str, str]]:
         """Lignes du tableau d'historique, dans l'ordre du DOM : ('application'|'event', texte)."""

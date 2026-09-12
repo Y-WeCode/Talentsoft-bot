@@ -551,10 +551,15 @@ Le texte du commentaire **n'apparaît nulle part dans la page** (vérifié par r
    la relecture du Back Office. Le cas `unverified` + rejeu est le plus dangereux : il créerait un doublon
    sans aucun moyen de le détecter. Conserver la règle « ne jamais rejouer après `mutation_started` ».
 
-### Constat 3 — `tr.selectedLine` n'est pas fiable
+### Constat 3 — `tr.selectedLine` : présent après sélection, absent après mutation
 
-Après le postback de validation, **plus aucune ligne ne porte `selectedLine`** : les deux candidatures sont
-en `ch_content_outerrep`. Le garde-fou envisagé ne peut donc pas reposer sur cette classe.
+Après le postback de validation, **plus aucune ligne ne porte `selectedLine`**.
+
+> **Rectification du 12/09/2026 (audit du parcours réel).** Ce constat avait été généralisé à tort en
+> « `selectedLine` n'est pas fiable ». En réalité la classe est **présente après une sélection explicite**
+> de candidature — ce que le bot fait systématiquement avant toute action. Elle est absente au chargement
+> de la fiche et après un postback de mutation, pas en permanence.
+> `selected_offer_matches()` s'en sert donc comme **preuve directe**, avec l'ordre du DOM en second recours.
 
 **Critère de remplacement — l'ordre du DOM** : les `tr.trChildrenEvent` d'une candidature suivent
 immédiatement sa ligne `tr.ch_content_outerrep`, jusqu'à la ligne `ch_content_outerrep` suivante.
@@ -809,3 +814,59 @@ viewport explicite de 1440 × 900, au lieu de s'en remettre au défaut de Playwr
 
 `{base}/Home/Welcome` ouvre directement l'accueil recrutement (titre « Accueil recrutement »), et les
 marqueurs `AUTHENTICATED_MARKERS` y matchent (`/Home/Welcome`, `/VacancyDashboard` visibles).
+
+### Sélection de candidature : un postback qui conditionne tout le reste
+
+Mesuré sur la fiche témoin, **avant** toute sélection :
+
+| Élément | État |
+| --- | --- |
+| `tr.ch_content_outerrep` | 3 candidatures, visibles |
+| `tr.trChildrenEvent` | 6 lignes présentes, **0 visible** (`display: none`) |
+| `a[id*='lblJobAppActionName']` | **0 — absentes du DOM** |
+| `tr.selectedLine` | absent |
+
+**Après** un clic sur le lien `lnkOfferLabel` de la candidature visée :
+
+| Élément | État |
+| --- | --- |
+| `tr.trChildrenEvent` | 6 lignes, **toutes visibles** |
+| `a[id*='lblJobAppActionName']` | **88 liens, tous visibles, tous avec `confirm()`** |
+| `tr.selectedLine` | **présent**, sur la bonne candidature |
+
+Trois conséquences pour le bot :
+
+1. **Sélectionner avant d'agir** n'est pas une précaution mais une nécessité : les actions de workflow
+   n'existent pas dans le DOM tant qu'aucune candidature n'est sélectionnée.
+2. Attendre la **visibilité** des lignes d'événement, pas leur présence : elles sont déjà là, repliées.
+3. Les **88 actions déclenchent toutes un `confirm()`** natif. Sans le handler `page.on("dialog")`,
+   aucune ne produirait le moindre effet, silencieusement.
+
+### Accès direct à une fiche : `RedirectionMenu.ashx`
+
+Le lien porté par une suggestion de recherche est :
+
+```
+{base}/Pages/Utils/RedirectionMenu.ashx?key=ApplicantView&id=<applicantGuid>
+```
+
+Cette URL **ouvre directement la fiche**, onglet Historique actif. Deux enseignements :
+
+- la recherche **expose le `applicantGuid`**, l'identifiant interne qu'on croyait hors de portée ;
+- une fois ce GUID connu pour un candidat, la fiche est atteignable sans repasser par l'overlay React.
+  Piste d'optimisation : mémoriser le GUID par email côté Hippolyte.ai après le premier accès.
+
+Une URL de recherche directe existe également :
+`{base}/Search/RedirectToApplicantSearchResults?searchTerm=<email>`.
+
+### Structure d'une suggestion de recherche
+
+```
+[role='option']
+  └─ <a href="/Pages/Utils/RedirectionMenu.ashx?key=ApplicantView&id=<guid>">
+<a>Voir plus de candidats pour : <email></a>      ← HORS de [role='option']
+```
+
+Le lien « Voir plus de candidats » est un frère de l'option, pas un enfant : le sélecteur
+`[role='listbox'] [role='option']` ne le capture pas. Un repli sur `[role='listbox'] li`, lui, le
+prendrait — raison de plus pour garder le sélecteur le plus étroit en tête de liste.
