@@ -70,6 +70,14 @@ _FATAL_FRAGMENTS = (
 )
 
 
+# User-agent d'un Chromium de bureau. Repris tel quel en headless, où Playwright annoncerait
+# sinon « HeadlessChrome ». La version suit celle de l'image Playwright du Dockerfile ; un
+# décalage mineur est sans conséquence, seul le mot « Headless » pose problème.
+_DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
+)
+
+
 class BrowserFatalError(Exception):
     """Le navigateur ou le contexte est perdu : la session doit être recyclée."""
 
@@ -134,6 +142,17 @@ class TalentsoftBot:
             "locale": "fr-FR",
             "viewport": {"width": 1440, "height": 900},
         }
+        # En mode headless, Chromium annonce « HeadlessChrome » dans son user-agent. Des
+        # fournisseurs d'identité refusent ces navigateurs — sans message d'erreur : le
+        # formulaire est accepté, mais l'authentification n'aboutit pas. On présente donc le
+        # même Chromium sous son user-agent normal.
+        # Ce n'est pas un contournement de protection : le bot s'authentifie avec un compte
+        # applicatif légitime, sur un tenant dont l'exploitant demande cette automatisation.
+        user_agent = config.browser_user_agent()
+        if user_agent:
+            context_kwargs["user_agent"] = user_agent
+        elif config.headless_mode():
+            context_kwargs["user_agent"] = _DEFAULT_USER_AGENT
         state_path = config.storage_state_path()
         if os.path.exists(state_path):
             context_kwargs["storage_state"] = state_path
@@ -337,6 +356,9 @@ class TalentsoftBot:
             self.page.wait_for_timeout(500)
 
         if not landed:
+            # Capture utile au diagnostic : un champ mot de passe s'affiche masqué, sa valeur
+            # n'apparaît donc pas. Activée seulement si SCREENSHOTS_ENABLED.
+            self.screenshot("login_not_confirmed")
             raise LoginError(
                 f"login_not_confirmed: parcours SSO non abouti (url={self._safe_url()}, "
                 f"page={self._login_failure_hint(login_page)})"

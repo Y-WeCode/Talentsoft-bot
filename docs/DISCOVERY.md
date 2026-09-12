@@ -1106,3 +1106,41 @@ Dès qu'un élément est masqué (`visibility: hidden`, taille nulle) **ou** qu'
 les locators Playwright deviennent peu fiables et coûteux : chaque appel sans timeout explicite peut
 consommer 30 s pour rien. Dans ces cas, une évaluation unique dans la page est à la fois plus rapide,
 plus lisible et plus sûre.
+
+## Login qui n'aboutit pas : la piste du mode headless
+
+Après correction du choix de compte, le selftest atteint le formulaire de l'IdP, soumet les
+identifiants… et reste sur l'IdP :
+
+```
+account_choice_selected_via=checked
+account_choice_submitted choice='accès @rtémis pour les filiales'   (le bon compte)
+login_attempt
+login_not_confirmed: parcours SSO non abouti (url=testidpsbg1.../wsfed/issue)
+```
+
+Ce qui a été écarté par vérification :
+
+| Hypothèse | Vérification |
+| --- | --- |
+| Mauvais compte sélectionné | Le compte technique dépend bien des **filiales** : la sélection était correcte |
+| Formulaire différent selon l'accès | Rejoué dans le navigateur : l'IdP des filiales est **identique** (`Username`, `Password`, `button.btn-primary`) |
+| Identifiants erronés | Connexion **manuelle réussie** avec les identifiants du `.env` |
+| `.env` altéré (troncature, quotes) | Longueurs et premiers/derniers caractères conformes |
+| Redirection vers un 4ᵉ hôte bloqué | Aucun hôte inconnu observé lors du login manuel |
+
+### Hypothèse retenue : le user-agent headless
+
+En headless, Chromium annonce **`HeadlessChrome`**. Des fournisseurs d'identité refusent ces
+navigateurs **sans message d'erreur** : le formulaire est accepté, l'authentification n'aboutit pas.
+Le symptôme correspond exactement — soumission acceptée, pas d'erreur affichée, retour au formulaire.
+
+Le contexte présente donc désormais un user-agent de bureau, et `BROWSER_USER_AGENT` permet de
+l'imposer explicitement. Deux tests garantissent qu'aucun « Headless » ne subsiste.
+
+Ce n'est pas un contournement de protection : le bot s'authentifie avec un compte applicatif
+légitime, sur un tenant dont l'exploitant demande cette automatisation.
+
+**Statut : à confirmer** par un selftest après redéploiement. Si l'échec persiste, l'erreur porte
+maintenant ce que la page affiche (`page=formulaire_toujours_affiché texte='…'`), et une capture est
+enregistrée quand `SCREENSHOTS_ENABLED=true`.

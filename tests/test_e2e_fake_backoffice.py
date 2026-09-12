@@ -461,3 +461,26 @@ def test_back_office_presence_is_checked_by_origin(bot):
     assert bot._on_back_office() is True
     bot.page.goto(LANDING + "/MyTalentsoft", wait_until="domcontentloaded")
     assert bot._on_back_office() is False
+
+
+def test_headless_never_announces_itself_as_headless(bot):
+    """Des fournisseurs d identite refusent « HeadlessChrome », sans message d erreur.
+
+    Le formulaire est alors accepte mais l authentification n aboutit pas : un echec muet,
+    tres couteux a diagnostiquer. Le contexte doit donc presenter un user-agent de bureau.
+    """
+    user_agent = bot.page.evaluate("() => navigator.userAgent")
+    assert "Headless" not in user_agent, user_agent
+    assert "Chrome" in user_agent
+
+
+def test_user_agent_can_be_overridden(bot_env, monkeypatch):
+    """Un tenant peut exiger un user-agent particulier : il reste configurable."""
+    from app.scraper import TalentsoftBot
+
+    monkeypatch.setenv("BROWSER_USER_AGENT", "Mozilla/5.0 (Test) AgentPersonnalise/1.0")
+    instance = TalentsoftBot()
+    try:
+        assert instance.page.evaluate("() => navigator.userAgent") == "Mozilla/5.0 (Test) AgentPersonnalise/1.0"
+    finally:
+        instance.close()
