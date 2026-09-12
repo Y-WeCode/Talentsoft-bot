@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><title>Connexion</title></head>
+<body>
+<h1>Talentsoft Recruiting (faux tenant de test)</h1>
+<form id="loginForm" action="/Account/Logon" method="post">
+  <label for="UserName">Identifiant</label>
+  <input id="UserName" name="UserName" type="text">
+  <label for="Password">Mot de passe</label>
+  <input id="Password" name="Password" type="password">
+  <div class="validation-summary-errors" id="err" style="display:none">Identifiant ou mot de passe incorrect</div>
+  <button type="submit">Se connecter</button>
+</form>
+<script>
+document.getElementById('loginForm').addEventListener('submit', function (e) {
+  e.preventDefault();
+  var ok = document.getElementById('UserName').value === 'bot@example.com' && document.getElementById('Password').value === 'secret';
+  if (ok) { document.cookie = 'ts_session=1; path=/'; window.location.href = '/Recruiting/BackOffice/Home'; }
+  else { document.getElementById('err').style.display = 'block'; }
+});
+</script>
+</body></html>
