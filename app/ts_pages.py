@@ -51,6 +51,13 @@ class CategoryOccupied(Exception):
     """La catégorie de pièce jointe contient déjà un document : déposer l'écraserait."""
 
 
+class MailDialogOpened(Exception):
+    """L'action ouvre un envoi de courrier au candidat, pas un formulaire d'événement.
+
+    Le bot referme la modale et refuse de poursuivre : valider y enverrait un message réel.
+    """
+
+
 class Deadline:
     """Budget temps global d'un job, partagé par toutes les actions."""
 
@@ -709,9 +716,15 @@ class EventDialog:
         return self.page.frame_locator(sel.EVENT_DIALOG_FRAME[0])
 
     def wait_open(self) -> FrameLocator:
-        """Attend que l'iframe soit présente ET son formulaire chargé."""
+        """Attend que l'iframe soit présente ET son formulaire chargé.
+
+        Surveille en parallèle l'ouverture d'un parcours d'envoi de courrier : certaines
+        actions de workflow ouvrent celui-ci au lieu du formulaire d'événement. Dans ce cas on
+        referme et on abandonne, plutôt que d'attendre en laissant la modale ouverte.
+        """
         deadline = time.monotonic() + min(self._t(), 20000) / 1000.0
         while time.monotonic() < deadline:
+            self._abort_if_mail_dialog()
             if any_present(self.page, sel.EVENT_DIALOG_FRAME, require_visible=False):
                 frame = self.frame()
                 try:
@@ -721,6 +734,26 @@ class EventDialog:
                     pass
             self.page.wait_for_timeout(250)
         raise SelectorNotFound("formulaire d'événement non chargé")
+
+    def _abort_if_mail_dialog(self) -> None:
+        """Referme un parcours d'envoi de courrier ouvert par mégarde, et refuse de continuer.
+
+        Constaté sur le tenant : l'action « Candidature à l'étude » n'ouvre pas le formulaire
+        d'événement mais `ActionMailLanguageChoicePage`, dont le bouton « Valider » (`btnSend`)
+        **envoie un courrier au candidat**. Poursuivre dans cette modale enverrait un message
+        réel : on annule et on remonte une erreur explicite.
+        """
+        if not any_present(self.page, sel.FORBIDDEN_DIALOG_FRAMES, require_visible=False):
+            return
+        logger.error("mail_dialog_detected : parcours d'envoi de courrier ouvert, annulation")
+        try:
+            frame = self.page.frame_locator(sel.FORBIDDEN_DIALOG_FRAMES[0])
+            cancel = first_locator(self.page, sel.FORBIDDEN_DIALOG_CANCEL, 5000, scope=frame, require_visible=False)
+            cancel.click(timeout=5000)
+            self.page.wait_for_timeout(1000)
+        except Exception as error:
+            logger.warning(f"mail_dialog_cancel_failed error={type(error).__name__}")
+        raise MailDialogOpened("cette action ouvre un envoi de courrier au candidat, pas un formulaire d'événement")
 
     def open_from_workflow_action(self, action_label: str | None = None) -> FrameLocator:
         """Ouvre le formulaire d'événement via une action du panneau Outils.

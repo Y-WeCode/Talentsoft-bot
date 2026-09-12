@@ -284,6 +284,19 @@ WORKFLOW_ACTION_LINKS = ["a[id*='lblJobAppActionName']"]
 # cibler par le nom de la page, jamais par l'URL complète.
 EVENT_DIALOG_FRAME = ["iframe[src*='JobApplicationChildEventEdit']"]
 
+# Modales que le bot NE DOIT JAMAIS VALIDER. Certaines actions de workflow n'ouvrent pas le
+# formulaire d'événement mais un parcours d'envoi de courrier au candidat : l'écran de choix
+# de langue (`ActionMailLanguageChoicePage`), puis l'éditeur de courrier.
+# Ouvrir un tel parcours par erreur est déjà fâcheux ; le valider enverrait un message réel à
+# un candidat. Détecter, annuler, et signaler — jamais poursuivre.
+FORBIDDEN_DIALOG_FRAMES = [
+    "iframe[src*='ActionMailLanguageChoicePage']",
+    "iframe[src*='Correspondence/']",
+]
+
+# Bouton d'annulation de ces modales, pour refermer proprement ce qu'on a ouvert par erreur.
+FORBIDDEN_DIALOG_CANCEL = ["input[id$='btnCancel']", "input.cancel-button"]
+
 # Boutons « Ajouter » de l'onglet Historique. ATTENTION à ne pas les confondre :
 #   btCreateApplicantEvent      → événement au niveau CANDIDAT (la personne)
 #   btCreateJobApplicationEvent → crée une NOUVELLE CANDIDATURE
@@ -305,7 +318,11 @@ EVENT_COMMENT = ["textarea[id$='EventComment']", "textarea"]
 # Pré-rempli avec l'utilisateur connecté (le compte technique du bot).
 EVENT_SUPERVISOR_SELECT = ["select[id$='ddlSupervisor']"]
 
-EVENT_SUBMIT = ["input[id$='btValidate']", "input.valid-button"]
+# DANGER, constaté le 12/09/2026 : `input.valid-button` est une classe PARTAGÉE par toutes
+# les modales du Back Office, y compris `ActionMailLanguageChoicePage`, dont le bouton
+# `btnSend` (« Valider ») ENVOIE UN COURRIER AU CANDIDAT. Ne jamais valider sur une classe
+# générique : seul le suffixe d'identifiant dit ce que l'on valide.
+EVENT_SUBMIT = ["input[id$='btValidate']"]
 EVENT_CANCEL = ["input[id$='btCancel']", "input.cancel-button"]
 
 # Limite réelle du champ commentaire dans le Back Office.
@@ -334,7 +351,9 @@ ATTACHMENT_DIALOG_FRAME = ["iframe[src*='AttachedFileEdit']"]
 ATTACHMENT_FILE_INPUTS = ["input[type='file']"]
 
 # Bouton de validation du dépôt : value « Enregistrer » (et non « Valider »).
-ATTACHMENT_SUBMIT = ["input[id$='btValidate']", "input.valid-button"]
+# Comme pour les événements, pas de repli sur `input.valid-button` : cette classe désigne
+# aussi le bouton d'envoi de courrier d'une autre modale.
+ATTACHMENT_SUBMIT = ["input[id$='btValidate']"]
 ATTACHMENT_CANCEL = ["input[id$='btCancel']", "input.cancel-button"]
 
 # Contraintes affichées par le formulaire de dépôt.

@@ -870,3 +870,63 @@ Une URL de recherche directe existe également :
 Le lien « Voir plus de candidats » est un frère de l'option, pas un enfant : le sélecteur
 `[role='listbox'] [role='option']` ne le capture pas. Un repli sur `[role='listbox'] li`, lui, le
 prendrait — raison de plus pour garder le sélecteur le plus étroit en tête de liste.
+
+## FAILLE CRITIQUE : une action de workflow peut envoyer un courrier au candidat
+
+Constatée le 12/09/2026 en exécutant réellement le parcours du bot sur la fiche témoin.
+
+### Ce qui s'est passé
+
+Clic sur l'action **« Candidature à l'étude »**, choisie comme la plus anodine (elle figurait déjà
+dans l'historique de la candidature). Elle n'a PAS ouvert le formulaire d'événement, mais :
+
+```
+../Correspondence/ActionMailLanguageChoicePage.aspx
+    « Langue »  [English UK | Français]
+    [Annuler]  [Valider]
+```
+
+Un écran de choix de langue pour un **courrier au candidat**. Le bouton de validation est
+`btnSend` — *send*, envoyer.
+
+Aucun courrier n'a été envoyé : la modale a été annulée, et l'historique est resté à 6 événements.
+
+### Pourquoi c'était dangereux pour le bot
+
+```
+btnSend  id="...ButtonPlaceHolder1_ctl02_btnSend"  class="valid-button"  value="Valider"
+
+EVENT_SUBMIT = ["input[id$='btValidate']", "input.valid-button"]
+                 ↑ 0 match ici            ↑ MATCHE btnSend
+```
+
+`valid-button` est une classe **partagée par toutes les modales** du Back Office : elle dit qu'un
+bouton valide quelque chose, jamais *quoi*. Le repli sur cette classe désignait donc le bouton
+d'envoi d'un courrier réel à un candidat.
+
+Le bot n'aurait probablement pas cliqué — `wait_open()` attend l'iframe `JobApplicationChildEventEdit`,
+absente ici, et aurait fini en `SelectorNotFound`. Mais la protection était **accidentelle**, et la
+modale serait restée ouverte, bloquant les actions suivantes.
+
+### Correctifs
+
+1. **`input.valid-button` retiré** de `EVENT_SUBMIT` et `ATTACHMENT_SUBMIT`. Ne valider que sur un
+   suffixe d'identifiant, qui identifie le formulaire.
+2. **Détection active** : `EventDialog.wait_open()` surveille `FORBIDDEN_DIALOG_FRAMES`
+   (`ActionMailLanguageChoicePage`, `Correspondence/`). Si un tel parcours s'ouvre, le bot **annule
+   la modale** et lève `MailDialogOpened`.
+3. Côté API, cela devient un échec d'action explicite :
+   `{"ok": false, "error": "event_type_sends_mail"}`, sans mutation.
+4. Deux tests de non-régression, dont un qui vérifie qu'aucun courrier n'est parti et que la modale
+   a bien été refermée.
+
+### Conséquence pour le paramétrage client
+
+**On ne peut pas deviner, depuis le libellé d'un type d'événement, s'il déclenche un courrier.**
+« Candidature à l'étude » semblait inoffensif et ne l'était pas. La liste des types « à courrier »
+est propre au paramétrage du tenant.
+
+Avant toute mise en production, faire valider par le client la liste des types utilisables par un
+automate. Le bot refuse désormais ceux qui ouvrent un parcours de courrier, mais il vaut mieux ne
+pas les demander du tout : l'échec survient après l'ouverture de la fiche, donc après avoir consommé
+un créneau navigateur.

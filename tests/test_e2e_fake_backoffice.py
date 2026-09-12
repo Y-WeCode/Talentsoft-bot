@@ -110,6 +110,8 @@ class FakeServer:
             return route.fulfill(status=200, content_type="text/html", body=_page("applicant.html"))
         if path == "/Pages/Applicants.Events/JobApplicationChildEventEdit.aspx":
             return route.fulfill(status=200, content_type="text/html", body=_page("event-dialog.html"))
+        if path == "/Pages/Correspondence/ActionMailLanguageChoicePage.aspx":
+            return route.fulfill(status=200, content_type="text/html", body=_page("mail-language-dialog.html"))
         if path == "/Pages/Utils/AttachedFileEdit.aspx":
             return route.fulfill(status=200, content_type="text/html", body=_page("attachment-dialog.html"))
         return route.fulfill(status=200, content_type="text/html", body=_page("home.html"))
@@ -382,3 +384,40 @@ def test_search_result_matching_the_email_is_opened(bot):
     search = GlobalSearch(bot.page, bot.deadline, 5000)
     search.search("candidat@example.com")
     assert search.open_single_result("candidat@example.com") is True
+
+
+def test_action_opening_a_mail_flow_is_refused_and_closed(bot):
+    """Une action qui ouvre un envoi de courrier ne doit ni etre validee ni rester ouverte.
+
+    Sur le tenant, « Candidature a l etude » ouvre ActionMailLanguageChoicePage, dont le
+    bouton « Valider » (btnSend, classe `valid-button`) ENVOIE un courrier au candidat.
+    Valider la aurait adresse un message reel a une personne.
+    """
+    app_page, _ = bot.open_application("candidat@example.com", "25152")
+    before = len(app_page.list_events("25152"))
+
+    result = bot.add_event(app_page, "25152", "Courrier au candidat", "Ne doit pas partir", "2026-09-14")
+
+    assert result["ok"] is False
+    assert result["error"] == "event_type_sends_mail"
+    assert result.get("mutation_started") is not True
+    # Aucun courrier envoye...
+    assert bot.page.evaluate("() => !!window.__mailWasSent") is False
+    # ...aucun evenement cree...
+    assert len(app_page.list_events("25152")) == before
+    # ...et la modale a ete refermee, pour ne pas bloquer la suite.
+    assert bot.page.locator("iframe[src*='ActionMailLanguageChoicePage']").count() == 0
+
+
+def test_event_submit_selector_never_matches_a_mail_send_button(bot):
+    """Garde-fou de selecteur : valider ne doit jamais se faire sur une classe generique.
+
+    `input.valid-button` designe aussi le bouton d envoi de courrier : il ne doit plus
+    figurer parmi les candidats de validation.
+    """
+    from app import ts_selectors
+
+    assert "input.valid-button" not in ts_selectors.EVENT_SUBMIT
+    assert "input.valid-button" not in ts_selectors.ATTACHMENT_SUBMIT
+    assert all("btValidate" in candidate for candidate in ts_selectors.EVENT_SUBMIT)
+    assert all("btValidate" in candidate for candidate in ts_selectors.ATTACHMENT_SUBMIT)

@@ -43,6 +43,8 @@
        onclick="return confirm('Êtes-vous sûr de vouloir exécuter l\'action &quot;Candidature à l\'étude&quot; ?')">Candidature à l'étude</a>
     <a id="ctl00_repJobAppAction_ctl42_lblJobAppActionName" href="javascript:void(0)"
        onclick="return confirm('Êtes-vous sûr ?')">Entretien avis favorable</a>
+    <a id="ctl00_repJobAppAction_ctl43_lblJobAppActionName" href="javascript:void(0)"
+       onclick="return confirm('Êtes-vous sûr ?')">Courrier au candidat</a>
 
     <!-- Pièces jointes de la fiche : « NOM (Catégorie) », colonne d'origine FO/BO. -->
     <table class="subformWithoutBorder ts-table ts-content-table" id="attachedFilesList">
@@ -95,8 +97,14 @@ document.querySelectorAll('a[id$="lnkOfferLabel"]').forEach(function (link) {
 });
 
 // Actions de workflow : confirm() natif, puis modale en iframe.
+window.__mailSent = function () { window.__mailWasSent = true; window.__closeModal(); };
+
 document.querySelectorAll('a[id*="lblJobAppActionName"]').forEach(function (link) {
   link.addEventListener('click', function () {
+    if (/courrier/i.test(link.textContent || '')) {
+      window.__openModal('/Pages/Correspondence/ActionMailLanguageChoicePage.aspx?rwndrnd=' + Math.random());
+      return;
+    }
     // Le confirm() de l'attribut onclick s'exécute avant ce handler ; s'il a été rejeté,
     // le navigateur n'aurait pas suivi le lien. On ouvre donc la modale ici.
     window.__openModal('/Pages/Applicants.Events/JobApplicationChildEventEdit.aspx?rwndrnd=' + Math.random());

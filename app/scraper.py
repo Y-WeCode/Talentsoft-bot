@@ -50,6 +50,7 @@ from .ts_pages import (
     JobTimeout,
     LoginError,
     LoginPage,
+    MailDialogOpened,
     SelectorNotFound,
     normalize_text,
     parse_attachment_label,
@@ -465,7 +466,14 @@ class TalentsoftBot:
         before = len(app_page.list_events(offer_id))
 
         dialog = EventDialog(self.page, self.deadline, config.action_timeout_ms())
-        frame = dialog.open_from_workflow_action(event_type)
+        try:
+            frame = dialog.open_from_workflow_action(event_type)
+        except MailDialogOpened as error:
+            # Aucune mutation : la modale de courrier a ete refermee sans validation.
+            logger.error(f"event_opens_mail_flow event_type={event_type!r}")
+            result["error"] = "event_type_sends_mail"
+            result["detail"] = str(error)
+            return result
         try:
             chosen = dialog.fill(frame, event_type, comment, event_date)
         except ValueError as error:
