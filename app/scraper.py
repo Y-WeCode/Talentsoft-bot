@@ -371,7 +371,7 @@ class TalentsoftBot:
 
         # Rejoindre le Back Office : c'est le seul périmètre où le bot travaille, et le seul
         # où ses marqueurs d'authentification ont un sens.
-        self._goto(self.base_url + sel.LOGIN_PATH)
+        self._enter_back_office()
         self._dismiss_cookies()
         if login_page.is_displayed() or login_page.is_account_choice_displayed():
             raise LoginError("login_not_confirmed: le Back Office redemande une authentification")
@@ -472,6 +472,42 @@ class TalentsoftBot:
         from .ts_pages import any_present
 
         return any_present(self.page, sel.POST_LOGIN_MARKERS, require_visible=False)
+
+    def _enter_back_office(self) -> None:
+        """Ouvre le Back Office après le SSO.
+
+        Le viser par son URL ne suffit pas : tant que sa session applicative n'est pas ouverte,
+        sa racine comme `/Home/Welcome` renvoient vers l'espace collaborateur. C'est le lien
+        « Recrutement » du sélecteur d'espaces (`RedirectBackOffice.ashx`, servi par l'hôte
+        d'atterrissage) qui l'ouvre — constaté sur le tenant (docs/DISCOVERY.md).
+
+        On tente donc l'accès direct, puis ce point d'entrée si l'on a été renvoyé ailleurs.
+        """
+        self._goto(self.base_url + sel.LOGIN_PATH)
+        if self._on_back_office():
+            return
+
+        landing_origin = self._current_origin()
+        if not landing_origin:
+            return
+        entry = landing_origin + sel.BACK_OFFICE_ENTRY_PATH
+        if not safety.is_allowed_navigation(entry):
+            logger.warning(f"back_office_entry_hors_allowlist host={self._host_and_path(entry)}")
+            return
+        logger.info(f"back_office_entry via={self._host_and_path(entry)}")
+        self._goto(entry)
+        if not self._on_back_office():
+            # Le point d'entrée a pu poser la session sans nous y conduire : réessayer l'URL.
+            self._goto(self.base_url + sel.LOGIN_PATH)
+
+    def _current_origin(self) -> str:
+        try:
+            from urllib.parse import urlparse
+
+            parsed = urlparse(self.page.url or "")
+            return f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else ""
+        except Exception:
+            return ""
 
     def _on_back_office(self) -> bool:
         """Sommes-nous réellement sur le Back Office, et pas ailleurs sur le tenant ?

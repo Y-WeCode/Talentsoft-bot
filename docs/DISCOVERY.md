@@ -1189,3 +1189,35 @@ C'est le troisième élément dont l'apparence trompe : radio invisible mais pr�
 `src` ment sur le document chargé, bouton qui semble actif mais ne soumet pas. **Ne jamais supposer
 qu'un geste a produit son effet : le vérifier.** Chaque cascade du code suit désormais ce principe,
 et journalise ce qui a fonctionné (`login_submitted_via=entree`).
+
+## Entrer dans le Back Office : `RedirectBackOffice.ashx`
+
+Le login abouti, le selftest échouait encore à la toute dernière étape :
+
+```
+login_submitted_via=entree
+login_post  …/wsfed/issue   champs=['Password','Username','__RequestVerificationToken',…]
+login_post  …/wsfederation  champs=['wa','wctx','wresult']
+sso_completed landing=hors_back_office
+LoginError: login_not_confirmed: Back Office non reconnu (url=testairfrance.talent-soft.com/MyTalentsoft)
+```
+
+**Viser le Back Office par son URL ne suffit pas.** Vérifié dans le navigateur : après le SSO,
+`testairfrance-rh.talent-soft.com/` **et** `/Home/Welcome` renvoient tous deux vers l'espace
+collaborateur, tant que la session applicative du Back Office n'est pas ouverte.
+
+Le lien qui l'ouvre est celui du sélecteur d'espaces, intitulé « Recrutement » :
+
+```
+https://<espace-collaborateur>.talent-soft.com/RedirectBackOffice.ashx
+```
+
+Il est servi par **l'hôte d'atterrissage**, pas par `TS_BASE_URL` — raison de plus pour que cet hôte
+figure dans `TS_AUTH_HOSTS`.
+
+`_enter_back_office()` tente donc l'accès direct, puis ce point d'entrée si l'on a été renvoyé
+ailleurs, en le construisant depuis l'origine courante (l'hôte d'atterrissage varie selon le tenant)
+et en vérifiant qu'il reste dans l'allowlist.
+
+Les autres espaces suivent le même modèle et sont accessibles depuis le Back Office :
+`/MyTalentsoft#/Me` (espace collaborateur), `/TS_Administration/AdminMain.aspx` (administration).
