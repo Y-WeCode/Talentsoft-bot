@@ -21,7 +21,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from . import browser_lock, config, idempotency, models, safety
 from .scraper import ApplicationNotFound, BrowserFatalError, SessionExpired, sweep_old_traces
 from .session_manager import SessionBootstrapError, SessionDegradedError, session_manager
-from .ts_pages import JobTimeout
+from .ts_pages import AmbiguousCandidate, ApplicationNotOnOffer, CandidateNotFound, JobTimeout
 
 # --- Configuration et initialisation -----------------------------------------------------
 
@@ -38,7 +38,7 @@ if not config.ts_username() or not config.ts_password():
     raise ValueError("Les variables d'environnement TS_USERNAME et TS_PASSWORD doivent être définies.")
 
 ENABLE_API_DOCS = config.enable_api_docs()
-API_VERSION = "0.1.0"
+API_VERSION = "0.2.0"
 
 security = HTTPBearer()
 T = TypeVar("T")
@@ -191,8 +191,17 @@ def run_with_session(work: Callable[[object], T], lock_timeout_seconds: float = 
         except SessionExpired as error:
             session_manager.invalidate("session_expired")
             raise HTTPException(status_code=500, detail="Erreur interne du serveur") from error
-        except ApplicationNotFound as error:
-            raise HTTPException(status_code=404, detail="Candidature introuvable") from error
+        except (ApplicationNotFound, CandidateNotFound) as error:
+            raise HTTPException(status_code=404, detail="Candidat introuvable") from error
+        except ApplicationNotOnOffer as error:
+            raise HTTPException(status_code=404, detail="Ce candidat n'a pas de candidature sur cette offre") from error
+        except AmbiguousCandidate as error:
+            # Plusieurs candidats pour cet email : on refuse de choisir. Écrire sur le dossier
+            # d'un autre candidat serait une divulgation de données personnelles.
+            raise HTTPException(
+                status_code=409,
+                detail="Plusieurs candidats correspondent à cet email : levée d'ambiguïté requise",
+            ) from error
 
 
 def _run_browser_job(job_type: str, work: Callable[[object], T]) -> T:

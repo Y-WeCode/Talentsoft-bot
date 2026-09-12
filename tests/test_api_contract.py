@@ -483,3 +483,69 @@ def test_jobs_route_hides_document_paths(app_module, monkeypatch):
     client = TestClient(app_module.app)
     body = client.get("/jobs/abc", headers=AUTH).json()
     assert "document_paths" not in body["payload"]
+
+
+# --- Mapping des erreurs d'identification de candidature ---------------------------------
+
+
+def _bot_raising(app_module, monkeypatch, exception):
+    class RaisingBot(FakeBot):
+        def update_application(self, **kwargs):
+            self.update_calls += 1
+            raise exception
+
+    bot = RaisingBot()
+    monkeypatch.setattr(app_module.session_manager, "get_bot", lambda: bot)
+    return bot
+
+
+def test_unknown_candidate_is_404(app_module, monkeypatch):
+    from app.ts_pages import CandidateNotFound
+
+    _bot_raising(app_module, monkeypatch, CandidateNotFound("aucun"))
+    client = TestClient(app_module.app)
+    response = client.post(
+        "/update-application",
+        data={"candidate_email": "inconnu@example.com", "offer_id": "25152", "comment": "x"},
+        headers=AUTH,
+    )
+    assert response.status_code == 404
+
+
+def test_candidate_without_application_on_offer_is_404(app_module, monkeypatch):
+    from app.ts_pages import ApplicationNotOnOffer
+
+    _bot_raising(app_module, monkeypatch, ApplicationNotOnOffer("offre absente"))
+    client = TestClient(app_module.app)
+    response = client.post(
+        "/update-application",
+        data={"candidate_email": "candidat@example.com", "offer_id": "99999", "comment": "x"},
+        headers=AUTH,
+    )
+    assert response.status_code == 404
+
+
+def test_ambiguous_candidate_is_409_and_never_mutates(app_module, monkeypatch):
+    """Plusieurs candidats pour un email : refuser, jamais choisir au hasard."""
+    from app.ts_pages import AmbiguousCandidate
+
+    _bot_raising(app_module, monkeypatch, AmbiguousCandidate("3 résultats"))
+    client = TestClient(app_module.app)
+    response = client.post(
+        "/update-application",
+        data={"candidate_email": "homonyme@example.com", "offer_id": "25152", "comment": "x"},
+        headers=AUTH,
+    )
+    assert response.status_code == 409
+
+
+def test_identification_failure_releases_idempotency_key(app_module, monkeypatch):
+    """Aucune mutation n'a eu lieu : un rejeu légitime doit rester possible."""
+    from app.ts_pages import CandidateNotFound
+
+    bot = _bot_raising(app_module, monkeypatch, CandidateNotFound("aucun"))
+    client = TestClient(app_module.app)
+    data = {"candidate_email": "inconnu@example.com", "offer_id": "25152", "comment": "x", "idempotency_key": "k9"}
+    assert client.post("/update-application", data=data, headers=AUTH).status_code == 404
+    assert client.post("/update-application", data=data, headers=AUTH).status_code == 404
+    assert bot.update_calls == 2

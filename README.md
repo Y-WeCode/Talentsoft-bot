@@ -131,8 +131,20 @@ L'email n'est jamais renvoyé en clair : seule son empreinte figure dans la rép
 | `{"ok": false, "error": "event_failed" \| "upload_failed"}` | Échec avant clic de validation | Rejeu possible |
 | `{"ok": false, "error": "unverified", "mutation_may_have_happened": true}` | Clic effectué, relecture non confirmée | Statut indéterminé : relire `GET /applications/events` avant tout rejeu |
 
-Codes HTTP : `400` validation, `401` token, `404` candidat ou candidature introuvable, `409` requête identique
-en cours, `413` fichier trop volumineux, `503` + `Retry-After` navigateur occupé ou session dégradée, `500` générique.
+Codes HTTP :
+
+| Code | Cause |
+| --- | --- |
+| `400` | Validation : email malformé, offre invalide, extension refusée, rien à faire |
+| `401` | Token absent ou invalide |
+| `404` | Candidat introuvable, ou candidat sans candidature sur cette offre |
+| `409` | Requête identique déjà en cours, ou **plusieurs candidats pour cet email** (levée d'ambiguïté requise) |
+| `413` | Fichier trop volumineux |
+| `503` | Navigateur occupé ou session dégradée, avec `Retry-After` |
+| `500` | Erreur générique (le détail reste dans les logs du bot) |
+
+Sur `404` et `409`, aucune mutation n'a eu lieu et la clé d'idempotence est libérée : un rejeu est légitime
+une fois la cause corrigée.
 
 ### Deux limites du Back Office à connaître
 
