@@ -337,7 +337,10 @@ class TalentsoftBot:
             self.page.wait_for_timeout(500)
 
         if not landed:
-            raise LoginError(f"login_not_confirmed: parcours SSO non abouti (url={self._safe_url()})")
+            raise LoginError(
+                f"login_not_confirmed: parcours SSO non abouti (url={self._safe_url()}, "
+                f"page={self._login_failure_hint(login_page)})"
+            )
 
         # Rejoindre le Back Office : c'est le seul périmètre où le bot travaille, et le seul
         # où ses marqueurs d'authentification ont un sens.
@@ -351,6 +354,26 @@ class TalentsoftBot:
         self._authenticated = True
         self.save_storage_state()
         logger.info("login_success")
+
+    def _login_failure_hint(self, login_page: LoginPage) -> str:
+        """Ce que la page dit au moment où le login n'aboutit pas.
+
+        Sans cet indice, un échec se résume à « on est resté sur l'IdP », ce qui ne distingue
+        pas un mot de passe refusé d'un formulaire mal soumis. On se limite au texte
+        **visible** de la page de connexion : il ne contient ni identifiant saisi (la valeur
+        d'un champ n'est pas du texte), ni donnée candidat, l'authentification précédant
+        l'accès au moindre dossier.
+        """
+        detected = login_page.error_text()
+        if detected:
+            return f"erreur={detected[:120]!r}"
+        try:
+            visible = normalize_text(self.page.inner_text("body", timeout=3000))
+        except Exception:
+            return "texte indisponible"
+        # Le formulaire encore affiché est en soi une information : la soumission n'a rien donné.
+        still_form = "formulaire_toujours_affiché" if login_page.is_displayed() else "hors_formulaire"
+        return f"{still_form} texte={visible[:160]!r}"
 
     def _sso_completed(self, login_page: LoginPage) -> bool:
         """Le parcours d'authentification est-il sorti des écrans de connexion ?
