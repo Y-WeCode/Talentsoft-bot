@@ -930,3 +930,52 @@ Avant toute mise en production, faire valider par le client la liste des types u
 automate. Le bot refuse désormais ceux qui ouvrent un parcours de courrier, mais il vaut mieux ne
 pas les demander du tout : l'échec survient après l'ouverture de la fiche, donc après avoir consommé
 un créneau navigateur.
+
+## Expiration de session : le tenant renvoie vers l'espace collaborateur
+
+Constatée en cours d'audit, après un long moment d'inactivité sur le Back Office.
+
+Un clic sur une action de workflow n'a pas produit de modale : le navigateur s'est retrouvé sur
+`testairfrance.talent-soft.com/MyTalentsoft#/Me`. Viser ensuite directement l'URL d'une fiche
+(`RedirectionMenu.ashx?key=ApplicantView&id=…`) a **encore** redirigé vers l'espace collaborateur.
+
+**Ce tenant ne montre donc pas de formulaire de login quand la session du Back Office expire.**
+
+### Pourquoi c'était un angle mort
+
+`open_application()` détectait l'expiration en cherchant un formulaire de login ou l'écran de choix
+de compte. Sur l'espace collaborateur, ni l'un ni l'autre : le bot se serait cru connecté, puis aurait
+échoué plus loin sur une barre de recherche introuvable — un symptôme qui ne désigne pas sa cause, et
+qui aurait coûté un long détour de diagnostic en production.
+
+### Correctif
+
+`_on_back_office()` vérifie l'**origine** de la page courante, et non la présence d'un marqueur :
+après navigation vers `TS_BASE_URL`, se retrouver sur un autre hôte signifie que la session est perdue.
+Le bot relance alors un login complet, et abandonne en `SessionExpired` si la seconde tentative échoue.
+
+Le contrôle par origine est ici plus sûr qu'un contrôle par marqueur : `#TSBody.ts-page`, par exemple,
+est présent **aussi** sur l'espace collaborateur, et aurait laissé passer le cas.
+
+## Actions du panneau Outils : un sous-ensemble, et des pièges
+
+Relevé sur la fiche témoin : **88 actions** dans le panneau, pour **105 types** dans le référentiel du
+formulaire. Deux conséquences vérifiées :
+
+1. **Un type peut n'avoir aucune action.** « Convocation à un entretien individuel » (code 837) existe
+   dans le select du formulaire et dans l'historique de la candidature, mais ne figure pas parmi les 88
+   actions. L'action ne sert donc qu'à **ouvrir** le formulaire ; le type se choisit ensuite dans la
+   liste déroulante, qui porte le référentiel complet. C'est ce que fait `open_from_workflow_action()`.
+
+2. **Le suffixe `EVENEMENT` semble distinguer les actions sans courrier.** Le tenant expose des paires :
+
+   | Action | Comportement |
+   | --- | --- |
+   | « Candidature à l'étude » | ouvre un **envoi de courrier** (vérifié) |
+   | « A l'étude EVENEMENT » | créerait l'événement seul |
+
+   Cinq actions portent ce suffixe : `Offre clôturée`, `A l'étude`, `En attente`, `KD Non payé`,
+   `KD Remboursé`. Le client a vraisemblablement dupliqué ses actions pour séparer les deux usages.
+   **À confirmer avec lui** : c'est la piste la plus sérieuse pour choisir `TS_DEFAULT_EVENT_TYPE`.
+
+Une seule action annonce explicitement l'absence d'envoi : « Invitation session (sans mail) ».

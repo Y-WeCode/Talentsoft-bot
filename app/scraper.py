@@ -367,6 +367,20 @@ class TalentsoftBot:
 
         return any_present(self.page, sel.POST_LOGIN_MARKERS, require_visible=False)
 
+    def _on_back_office(self) -> bool:
+        """Sommes-nous réellement sur le Back Office, et pas ailleurs sur le tenant ?
+
+        Quand la session du Back Office expire, ce tenant ne renvoie PAS vers un formulaire de
+        login : il redirige vers l'espace collaborateur (MyTalentsoft), y compris lorsqu'on
+        vise directement l'URL d'une fiche. Sans ce contrôle, le bot se croit connecté, puis
+        échoue plus loin sur une barre de recherche introuvable — un symptôme qui ne désigne
+        pas sa cause.
+        """
+        try:
+            return safety.is_same_origin(self.page.url or "")
+        except Exception:
+            return False
+
     def _safe_url(self) -> str:
         """Hôte et chemin uniquement : les paramètres d'un retour SSO portent des jetons."""
         try:
@@ -417,10 +431,13 @@ class TalentsoftBot:
             self._goto(self.base_url + sel.LOGIN_PATH)
             self._dismiss_cookies()
             login_page = self._login_page()
-            if login_page.is_displayed() or login_page.is_account_choice_displayed():
+            expired = (
+                login_page.is_displayed() or login_page.is_account_choice_displayed() or not self._on_back_office()
+            )
+            if expired:
                 if attempt == 2:
-                    raise SessionExpired("login_redirect_twice")
-                logger.info("session_expired_relogin")
+                    raise SessionExpired(f"session non rétablie après re-login (url={self._safe_url()})")
+                logger.info(f"session_expired_relogin url={self._safe_url()}")
                 self._authenticated = False
                 self.login()
                 continue

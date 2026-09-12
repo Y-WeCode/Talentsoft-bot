@@ -58,6 +58,7 @@ class FakeServer:
         self.account_chosen = False
         self.credentials_posted = False
         self.landed = False
+        self.expire_to_landing = False
         self.blocked: list[str] = []
 
     def install(self, context):
@@ -102,6 +103,13 @@ class FakeServer:
                 body=_page("home.html"),
                 headers={"Set-Cookie": "ts_session=1; path=/"},
             )
+
+        if self.expire_to_landing:
+            # Session Back Office expiree : ce tenant ne montre PAS de formulaire de login, il
+            # REDIRIGE vers l'espace collaborateur, sur un autre hote. Servir simplement son
+            # contenu sous l'URL du Back Office ne reproduirait pas le cas : c'est le changement
+            # d'origine qui trahit la perte de session.
+            return route.fulfill(status=200, content_type="text/html", body=_page("sso-return.html"))
 
         if not logged_in:
             return route.fulfill(status=200, content_type="text/html", body=_page("account-choice.html"))
@@ -421,3 +429,23 @@ def test_event_submit_selector_never_matches_a_mail_send_button(bot):
     assert "input.valid-button" not in ts_selectors.ATTACHMENT_SUBMIT
     assert all("btValidate" in candidate for candidate in ts_selectors.EVENT_SUBMIT)
     assert all("btValidate" in candidate for candidate in ts_selectors.ATTACHMENT_SUBMIT)
+
+
+def test_session_expiring_to_the_collaborator_space_is_detected(bot):
+    """Une session Back Office expiree renvoie vers l espace collaborateur, pas vers un login.
+
+    Sans detection, le bot se croirait connecte puis echouerait sur une barre de recherche
+    introuvable — un symptome qui ne designe pas sa cause.
+    """
+    from app.scraper import SessionExpired
+
+    bot._server.expire_to_landing = True
+    with pytest.raises(SessionExpired):
+        bot.open_application("candidat@example.com", "25152")
+
+
+def test_back_office_presence_is_checked_by_origin(bot):
+    """Le controle de presence sur le Back Office repose sur l origine, pas sur un marqueur."""
+    assert bot._on_back_office() is True
+    bot.page.goto(LANDING + "/MyTalentsoft", wait_until="domcontentloaded")
+    assert bot._on_back_office() is False
