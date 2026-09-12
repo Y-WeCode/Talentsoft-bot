@@ -90,6 +90,15 @@ ACCOUNT_CHOICE_MARKERS = [
 
 ACCOUNT_CHOICE_RADIOS = ["input[type='radio']"]
 
+# Zone réellement cliquable d'une option, exprimée RELATIVEMENT à son bouton radio.
+# Sur le tenant, chaque radio est enveloppé dans un lien qui porte le libellé, et le radio
+# lui-même est masqué en CSS : c'est ce conteneur qu'un recruteur clique, et le seul élément
+# actionnable par Playwright.
+# Remonter depuis le radio plutôt que lister les conteneurs : une page qui imbrique
+# <a><label><input radio></label></a> produirait deux fois plus de conteneurs que de radios,
+# et tout appariement par position serait faux.
+ACCOUNT_CHOICE_OPTION_CLICKABLE_FROM_RADIO = "xpath=ancestor::*[self::a or self::label][1]"
+
 ACCOUNT_CHOICE_SUBMIT = [
     "role=button[name=/^\\s*continuer\\s*$/i]",
     "button[type='submit']",

@@ -295,3 +295,41 @@ def test_update_application_combines_event_and_document(bot, tmp_path):
     assert payload["actions"]["documents"][0]["ok"] is True
     # L'email ne doit jamais apparaître en clair dans la réponse.
     assert "candidat@example.com" not in str(payload)
+
+
+def test_account_can_be_chosen_by_identifier(bot_env, monkeypatch):
+    """Le compte doit pouvoir être désigné par son identifiant ASCII.
+
+    Les libellés du tenant sont accentués (« Accès @rtémis … ») : les transporter dans un
+    .env est fragile. La `value` du radio (`airfrance.fr`) est un identifiant sûr.
+    """
+    from app.scraper import TalentsoftBot
+
+    monkeypatch.setenv("TS_ACCOUNT_CHOICE", "airfrance.fr")
+    instance = TalentsoftBot()
+    server = FakeServer()
+    server.install(instance.context)
+    try:
+        instance.ensure_logged_in()
+        assert server.account_chosen is True
+        assert instance.is_authenticated()
+    finally:
+        instance.close()
+
+
+def test_unknown_account_choice_fails_with_a_usable_message(bot_env, monkeypatch):
+    """Un échec de choix doit dire ce qui a été cherché : sans cela, il est indiagnosticable."""
+    from app.scraper import TalentsoftBot
+    from app.ts_pages import LoginError
+
+    monkeypatch.setenv("TS_ACCOUNT_CHOICE", "compte-qui-n-existe-pas")
+    instance = TalentsoftBot()
+    server = FakeServer()
+    server.install(instance.context)
+    try:
+        with pytest.raises(LoginError) as exc:
+            instance.ensure_logged_in()
+        assert "account_choice_not_found" in str(exc.value)
+        assert "compte-qui-n-existe-pas" in str(exc.value)
+    finally:
+        instance.close()

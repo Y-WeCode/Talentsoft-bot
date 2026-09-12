@@ -12,6 +12,7 @@ Particularités du Back Office, relevées en phase 0 (docs/DISCOVERY.md) :
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import time
@@ -265,44 +266,123 @@ class LoginPage:
 
         `wanted` vide : on ne choisit que s'il n'y a qu'une seule option, sinon on refuse —
         se tromper de compte donnerait des droits ou un périmètre inattendus.
+
+        Le bouton radio est souvent **masqué en CSS**, seul son libellé étant visible et
+        cliquable. `check()` échouerait alors sur un élément non actionnable : on clique donc
+        le libellé, comme le ferait un recruteur, avec repli sur un cochage forcé.
         """
         radios = self.page.locator(sel.ACCOUNT_CHOICE_RADIOS[0])
         count = radios.count()
         if count == 0:
             raise LoginError("account_choice_no_option")
 
-        labels = []
+        labels, values = [], []
         for index in range(count):
+            radio = radios.nth(index)
             try:
-                labels.append(radios.nth(index).evaluate("el => (el.closest('label,a,div')||el).innerText || ''"))
+                labels.append(radio.evaluate("el => (el.closest('label,a,div')||el).innerText || ''"))
             except Exception:
                 labels.append("")
+            # La `value` du radio est un identifiant ASCII (`airfrance.fr`), bien plus sûr à
+            # transporter dans un .env que le libellé affiché, qui est accentué.
+            values.append((radio.get_attribute("value") or radio.get_attribute("id") or "").strip())
+
+        # Libellés et identifiants de compte applicatif, pas des données personnelles :
+        # les journaliser est ce qui rend un échec de choix diagnosticable.
+        logger.info(
+            f"account_choice_options count={count} "
+            f"options={[(v[:30], normalize_text(x)[:40]) for v, x in zip(values, labels, strict=False)]}"
+        )
 
         target = -1
         if wanted:
             wanted_norm = normalize_text(wanted)
-            for index, label in enumerate(labels):
-                if wanted_norm == normalize_text(label):
+            # Identifiant exact d'abord : sans ambiguïté et insensible aux libellés accentués.
+            for index, value in enumerate(values):
+                if value and normalize_text(value) == wanted_norm:
                     target = index
                     break
+            if target < 0:
+                for index, label in enumerate(labels):
+                    if wanted_norm == normalize_text(label):
+                        target = index
+                        break
             if target < 0:
                 for index, label in enumerate(labels):
                     if wanted_norm and wanted_norm in normalize_text(label):
                         target = index
                         break
             if target < 0:
-                raise LoginError("account_choice_not_found")
+                raise LoginError(
+                    f"account_choice_not_found: TS_ACCOUNT_CHOICE={wanted_norm[:40]!r} ne correspond "
+                    f"a aucune des {count} options (ni identifiant, ni libelle)"
+                )
         elif count == 1:
             target = 0
         else:
-            raise LoginError("account_choice_ambiguous")
+            raise LoginError(f"account_choice_ambiguous: {count} options, TS_ACCOUNT_CHOICE non renseigné")
 
-        radios.nth(target).check(timeout=self._t())
+        self._select_account_option(radios.nth(target))
+
         submit = first_locator(self.page, sel.ACCOUNT_CHOICE_SUBMIT, self._t())
         submit.click(timeout=self._t())
         chosen = normalize_text(labels[target])[:80]
-        logger.info("account_choice_submitted")
+        logger.info(f"account_choice_submitted choice={chosen[:40]!r}")
         return chosen
+
+    def _select_account_option(self, radio: Locator) -> None:
+        """Coche l'option, quel que soit l'habillage du bouton radio.
+
+        Trois tentatives, de la plus proche du geste humain à la plus directe : cliquer le
+        libellé visible, cocher le radio, forcer le cochage. Chaque tentative est bornée à
+        5 s — un radio masqué ferait sinon expirer tout le budget d'action sur la première.
+        """
+        if radio.is_checked():
+            return
+
+        container = radio.locator(sel.ACCOUNT_CHOICE_OPTION_CLICKABLE_FROM_RADIO)
+        radio_id = radio.get_attribute("id") or ""
+        # `label[for=...]` est le geste qui coche réellement un radio masqué : cliquer le
+        # conteneur ne suffit pas s'il n'établit pas lui-même l'association.
+        # La valeur est sérialisée en littéral quoté : sur le tenant, les identifiants
+        # contiennent un point (`airfrance.fr`), qu'un sélecteur non quoté lirait comme une classe.
+        label_for = self.page.locator(f"label[for={json.dumps(radio_id)}]") if radio_id else None
+
+        attempts = [
+            ("check", lambda: radio.check(timeout=min(self._t(), 5000))),
+        ]
+        if label_for is not None:
+            attempts.insert(0, ("label_for", lambda: label_for.first.click(timeout=min(self._t(), 5000))))
+        attempts.insert(
+            1 if label_for is not None else 0,
+            ("container", lambda: container.first.click(timeout=min(self._t(), 5000))),
+        )
+        attempts += [
+            ("force", lambda: radio.check(force=True, timeout=min(self._t(), 5000))),
+            # Dernier recours : l'élément est hors flux (taille nulle, opacité zéro), aucune
+            # interaction physique n'est possible. L'événement est envoyé directement.
+            ("dispatch", lambda: radio.dispatch_event("click")),
+        ]
+
+        last_error: Exception | None = None
+        for name, action in attempts:
+            try:
+                action()
+            except Exception as error:  # option masquée, recouverte, ou non actionnable
+                last_error = error
+                logger.debug(f"account_choice_attempt={name} failed error={type(error).__name__}")
+                continue
+            try:
+                if radio.is_checked():
+                    logger.info(f"account_choice_selected_via={name}")
+                    return
+            except Exception as error:
+                last_error = error
+
+        raise LoginError(
+            "account_choice_not_selectable: option non cochable "
+            f"({type(last_error).__name__ if last_error else 'aucune tentative concluante'})"
+        )
 
     def submit_credentials(self, username: str, password: str) -> None:
         username_input = first_locator(self.page, sel.LOGIN_USERNAME, self._t())

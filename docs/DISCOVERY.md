@@ -662,3 +662,54 @@ Espaces et tirets sont préservés.
 
 → Toute comparaison de noms (vérification `verified`, détection `already_present`) doit être
 **insensible à la casse**. Comparer `normalize_text()` des deux côtés.
+
+## Écran de choix de compte : structure exacte (12/09/2026, après échec du selftest)
+
+Le premier `POST /selftest` contre le tenant a échoué au choix du compte, avec 30 s de timeout par
+tentative. Inspection du DOM réel :
+
+| Attribut du bouton radio | Valeur |
+| --- | --- |
+| `visibility` | **`hidden`** |
+| `position` | `absolute` |
+| Dimensions | 13 × 13 (non nulles) |
+| `opacity` | `1` |
+
+**C'est `visibility: hidden` qui bloquait.** Playwright refuse de cocher un élément invisible et attend
+jusqu'au timeout d'action. `check(force=True)` ne suffit pas davantage : l'élément reste hors interaction.
+
+Chaque option expose en revanche un `<label for>` **visible, associé et non recouvert**
+(`label.control` pointe bien le radio, `elementFromPoint` renvoie le label lui-même) : c'est l'élément que
+clique un recruteur, et le seul geste qui coche réellement l'option.
+
+### Les deux comptes du tenant de recette
+
+| `value` / `id` du radio | Libellé affiché |
+| --- | --- |
+| `airfrance.fr` | Accès @rtémis pour Air France |
+| `idp01test_airfrance` | Accès @rtémis pour les filiales |
+
+Le champ posté est `IdentityProviderName`.
+
+**Les identifiants sont en ASCII, les libellés sont accentués** (`@rtémis`). `TS_ACCOUNT_CHOICE` accepte
+donc les deux, et l'identifiant est à privilégier : un libellé accentué dans un `.env` traversant
+docker-compose est une source d'ennuis inutile.
+
+### Correctifs apportés
+
+1. `LoginPage._select_account_option` tente cinq gestes, du plus humain au plus direct, chacun borné à 5 s :
+   `label[for]`, conteneur `<a>`/`<label>`, `check()`, `check(force=True)`, puis `dispatch_event("click")`.
+   Le succès est vérifié par `is_checked()` après chaque tentative, jamais supposé.
+2. Le sélecteur `label[for=...]` sérialise la valeur en littéral quoté : l'identifiant `airfrance.fr`
+   contient un point, qu'un sélecteur CSS non quoté interpréterait comme une classe.
+3. `TS_ACCOUNT_CHOICE` accepte l'identifiant ou le libellé.
+4. Les options disponibles sont journalisées (`account_choice_options`) : ce sont des noms de compte
+   applicatif, pas des données personnelles, et sans eux un échec de choix est indiagnosticable.
+
+### Leçon d'observabilité
+
+`session_manager` ne propageait que le **type** de l'exception : 62 secondes d'attente pour un
+`RuntimeError` sans contexte. Le message est désormais conservé — mais **uniquement** pour les exceptions
+que ce dépôt construit lui-même (`LoginError`, `SelectorNotFound`), dont les messages sont écrits sans
+secret par contrat. Une exception Playwright, qui peut porter une URL complète ou du HTML, ne propage
+toujours que son type.

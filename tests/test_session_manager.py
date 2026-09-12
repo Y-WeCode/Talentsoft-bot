@@ -18,6 +18,8 @@ class FakeBot:
         return self._authenticated
 
     def ensure_logged_in(self):
+        if isinstance(self.fail_login, Exception):
+            raise self.fail_login
         if self.fail_login:
             raise RuntimeError("login_failed")
         if not self._authenticated:
@@ -100,8 +102,22 @@ def test_degraded_after_repeated_login_failures(manager, monkeypatch):
 
 
 def test_bootstrap_error_never_leaks_message(manager):
+    """Une exception tierce ne doit jamais propager son message : il peut porter une URL,
+    du HTML ou une valeur saisie. Seul le type remonte."""
     manager._fail_login = True
     with pytest.raises(SessionBootstrapError) as exc:
         manager.get_bot()
     assert "login_failed" not in str(exc.value)
     assert str(exc.value) == "RuntimeError"
+
+
+def test_bootstrap_error_keeps_message_of_our_own_login_errors(manager):
+    """Nos LoginError sont ecrites sans secret par contrat : leur message est conserve,
+    sans quoi un echec de login est indiagnosticable en production."""
+    from app.ts_pages import LoginError
+
+    manager._fail_login = LoginError("account_choice_not_found: TS_ACCOUNT_CHOICE absent")
+    with pytest.raises(SessionBootstrapError) as exc:
+        manager.get_bot()
+    assert "account_choice_not_found" in str(exc.value)
+    assert str(exc.value).startswith("LoginError:")
