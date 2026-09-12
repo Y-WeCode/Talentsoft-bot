@@ -1,0 +1,20 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+venv/
+.venv/
+env/
+
+# Secrets et état d'exécution : jamais versionnés
+.env
+state/
+uploads/
+traces/
+logs/
+data/
+discovery/
+
+.vscode/
+.idea/
+*.swp
