@@ -979,3 +979,68 @@ formulaire. Deux conséquences vérifiées :
    **À confirmer avec lui** : c'est la piste la plus sérieuse pour choisir `TS_DEFAULT_EVENT_TYPE`.
 
 Une seule action annonce explicitement l'absence d'envoi : « Invitation session (sans mail) ».
+
+## Création d'un événement : LE bon chemin (vérifié par écriture réelle, 12/09/2026)
+
+> **Rectification.** Une analyse précédente concluait qu'un événement avec commentaire exigeait deux
+> étapes (création par une action, puis modification). **C'est faux.** Un formulaire de création complet
+> existe ; il n'avait simplement pas été trouvé.
+
+### Le bouton est porté par la LIGNE de la candidature
+
+Le tableau d'historique expose, sur chaque ligne de candidature, quatre boutons en fin de ligne :
+
+| Bouton | Intitulé | Usage |
+| --- | --- | --- |
+| `btnDocumentReader` | Accès aux documents liés à la candidature | lecture |
+| `btnSendMailNew` | **Correspondre avec le candidat** | **envoie un courrier — à ne jamais cliquer** |
+| **`btnEventActionNew`** | **Effectuer une action sur la candidature** | **ouvre « Création d'un événement »** |
+| `btnEventDetailsNew` | Détails de la candidature | lecture |
+
+`btnEventActionNew` ouvre `JobApplicationChildEventEdit.aspx`, titre « **Création d'un événement** » :
+106 types, date, commentaire (`maxlength=2000`), « Suivi par ». **Un seul passage suffit.**
+
+Test réel : type « Convocation à un entretien individuel » (837), date 14/09/2026, commentaire saisi.
+Résultat en base, relu dans la vue de l'événement :
+
+```
+Créé le 12/09/2026 par Gauthier BAILLEUL
+Événement   Convocation à un entretien individuel
+Date        14/09/2026
+Suivi par   Gauthier BAILLEUL
+Motif       Hippolyte.ai : creation directe avec commentaire, test du 12/09/2026. A supprimer.
+```
+
+Ce bouton appartenant à la ligne de la candidature, **la cible est sans ambiguïté** : aucun risque
+d'écrire sur une autre candidature du même candidat.
+
+### Pourquoi les actions du panneau « Outils » ne conviennent pas
+
+Trois comportements distincts, tous constatés :
+
+| Action | Effet réel |
+| --- | --- |
+| « Candidature à l'étude » | ouvre un **envoi de courrier** (`ActionMailLanguageChoicePage`) |
+| « A l'étude EVENEMENT » | **crée l'événement immédiatement, sans proposer de commentaire** |
+| *(un formulaire de saisie)* | **aucune action n'en ouvre** |
+
+Le besoin métier étant « événement typé **avec commentaire** », aucune de ces actions ne convient.
+`WORKFLOW_ACTION_LINKS` reste déclaré pour le diagnostic, mais **le bot ne l'utilise plus**.
+
+### Le commentaire s'appelle « Motif », et il EST relisible
+
+Il n'apparaît pas dans la liste de l'historique, mais bien dans la **vue** de l'événement
+(`JobApplicationChildEventView.aspx`), ouverte en cliquant `lnkEventTitle`, sous le libellé « Motif ».
+
+Cela nuance le constat précédent : une vérification **forte** du commentaire est possible, au prix d'une
+ouverture de modale supplémentaire. `verification: "weak"` reste le comportement par défaut — la
+vérification forte serait une évolution, à arbitrer selon le coût acceptable par push.
+
+La vue expose aussi `btnDelete` (**Supprimer**) : le bot ne doit jamais le cliquer.
+
+### Piège : l'iframe navigue en interne
+
+En passant de la vue à l'édition (bouton « Modifier »), le document chargé devient `...Edit.aspx` alors
+que l'attribut `src` de l'iframe continue d'indiquer `...View.aspx`. Un sélecteur
+`iframe[src*='...Edit']` ne la trouve donc pas. `EVENT_DIALOG_FRAME` porte un second candidat plus large
+pour couvrir ce cas.

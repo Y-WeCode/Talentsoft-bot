@@ -484,7 +484,7 @@ class TalentsoftBot:
 
         dialog = EventDialog(self.page, self.deadline, config.action_timeout_ms())
         try:
-            frame = dialog.open_from_workflow_action(event_type)
+            frame = dialog.open_on_selected_application()
         except MailDialogOpened as error:
             # Aucune mutation : la modale de courrier a ete refermee sans validation.
             logger.error(f"event_opens_mail_flow event_type={event_type!r}")
@@ -707,11 +707,7 @@ class TalentsoftBot:
         self.new_job()
         app_page, _ = self.open_application(candidate_email, offer_id)
         dialog = EventDialog(self.page, self.deadline, config.action_timeout_ms())
-        links = self.page.locator(sel.WORKFLOW_ACTION_LINKS[0])
-        if links.count() == 0:
-            return []
-        first_action = links.first.inner_text(timeout=5000)
-        frame = dialog.open_from_workflow_action(first_action)
+        frame = dialog.open_on_selected_application()
         try:
             return dialog.type_options(frame)
         finally:

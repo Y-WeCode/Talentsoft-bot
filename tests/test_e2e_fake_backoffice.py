@@ -394,27 +394,39 @@ def test_search_result_matching_the_email_is_opened(bot):
     assert search.open_single_result("candidat@example.com") is True
 
 
-def test_action_opening_a_mail_flow_is_refused_and_closed(bot):
-    """Une action qui ouvre un envoi de courrier ne doit ni etre validee ni rester ouverte.
+def test_mail_dialog_is_refused_and_closed_if_it_ever_opens(bot):
+    """Filet de securite : si un parcours d envoi de courrier s ouvre, ne jamais le valider.
 
-    Sur le tenant, « Candidature a l etude » ouvre ActionMailLanguageChoicePage, dont le
-    bouton « Valider » (btnSend, classe `valid-button`) ENVOIE un courrier au candidat.
-    Valider la aurait adresse un message reel a une personne.
+    Le bot n emprunte plus les actions du panneau Outils, donc ce cas ne devrait plus se
+    produire. Mais le bouton « Correspondre avec le candidat » est le voisin immediat de celui
+    qu il clique, sur la meme ligne : la detection reste indispensable.
     """
+    from app.ts_pages import EventDialog, MailDialogOpened
+
     app_page, _ = bot.open_application("candidat@example.com", "25152")
     before = len(app_page.list_events("25152"))
 
-    result = bot.add_event(app_page, "25152", "Courrier au candidat", "Ne doit pas partir", "2026-09-14")
+    # On ouvre deliberement le mauvais bouton, celui que le bot doit eviter.
+    row = bot.page.locator("tr.selectedLine")
+    row.locator("a[id$='btnSendMailNew']").click()
 
-    assert result["ok"] is False
-    assert result["error"] == "event_type_sends_mail"
-    assert result.get("mutation_started") is not True
-    # Aucun courrier envoye...
+    dialog = EventDialog(bot.page, bot.deadline, 5000)
+    with pytest.raises(MailDialogOpened):
+        dialog.wait_open()
+
+    # Aucun courrier envoye, aucun evenement cree, et la modale a ete refermee.
     assert bot.page.evaluate("() => !!window.__mailWasSent") is False
-    # ...aucun evenement cree...
     assert len(app_page.list_events("25152")) == before
-    # ...et la modale a ete refermee, pour ne pas bloquer la suite.
     assert bot.page.locator("iframe[src*='ActionMailLanguageChoicePage']").count() == 0
+
+
+def test_bot_never_clicks_the_correspondence_button(bot):
+    """Le bouton de courrier est le voisin de celui du bot : verifier qu ils sont distincts."""
+    from app import ts_selectors
+
+    assert ts_selectors.EVENT_ACTION_BUTTON != ts_selectors.ROW_SEND_MAIL_BUTTON
+    assert all("btnEventActionNew" in c for c in ts_selectors.EVENT_ACTION_BUTTON)
+    assert all("btnSendMailNew" in c for c in ts_selectors.ROW_SEND_MAIL_BUTTON)
 
 
 def test_event_submit_selector_never_matches_a_mail_send_button(bot):

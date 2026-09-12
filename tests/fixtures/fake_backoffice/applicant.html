@@ -26,6 +26,8 @@
       <td><a id="ctl00_rep_ctl01_lnkEventName" href="javascript:void(0)">Réponse à offre</a>
           <a id="ctl00_rep_ctl01_lnkOfferLabel" href="javascript:void(0)">Peintre aéronautique F/H ( réf. 2026-23770)</a></td>
       <td>12/09/2026</td><td>-</td><td>-</td><td>A traiter</td><td>Recruteur Test</td>
+      <td><a id="ctl00_rep_ctl01_btnSendMailNew" href="javascript:void(0)" title="Correspondre avec le candidat">M</a></td>
+      <td><a id="ctl00_rep_ctl01_btnEventActionNew" href="javascript:void(0)" title="Effectuer une action sur la candidature">A</a></td>
     </tr>
 
     <tr class="ch_content_outerrep" data-offer="25152">
@@ -33,6 +35,8 @@
       <td><a id="ctl00_rep_ctl03_lnkEventName" href="javascript:void(0)">Réponse à offre</a>
           <a id="ctl00_rep_ctl03_lnkOfferLabel" href="javascript:void(0)">Agent d'Escale Commercial F/H ( réf. 2026-25152)</a></td>
       <td>12/09/2026</td><td>-</td><td>-</td><td>Réactivée</td><td>Recruteur Test</td>
+      <td><a id="ctl00_rep_ctl03_btnSendMailNew" href="javascript:void(0)" title="Correspondre avec le candidat">M</a></td>
+      <td><a id="ctl00_rep_ctl03_btnEventActionNew" href="javascript:void(0)" title="Effectuer une action sur la candidature">A</a></td>
     </tr>
   </table>
 
@@ -73,7 +77,8 @@ function renderEvents() {
   var table = document.querySelector('table.events-history-table');
   Array.from(table.querySelectorAll('tr.trChildrenEvent')).forEach(function (r) { r.remove(); });
   if (!selectedOffer) return;
-  var parent = table.querySelector('tr.ch_content_outerrep[data-offer="' + selectedOffer + '"]');
+  // La ligne selectionnee a change de classe : la retrouver par son offre, pas par sa classe.
+  var parent = table.querySelector('tr[data-offer="' + selectedOffer + '"]');
   if (!parent) return;
   var after = parent;
   EVENTS[selectedOffer].forEach(function (ev, i) {
@@ -92,6 +97,11 @@ document.querySelectorAll('a[id$="lnkOfferLabel"]').forEach(function (link) {
   link.addEventListener('click', function () {
     var row = link.closest('tr');
     selectedOffer = row.getAttribute('data-offer');
+    // Le Back Office marque la candidature selectionnee.
+    Array.from(document.querySelectorAll('tr.selectedLine')).forEach(function (r) {
+      r.className = 'ch_content_outerrep';
+    });
+    row.className = 'selectedLine';
     setTimeout(renderEvents, 60);
   });
 });
@@ -108,6 +118,18 @@ document.querySelectorAll('a[id*="lblJobAppActionName"]').forEach(function (link
     // Le confirm() de l'attribut onclick s'exécute avant ce handler ; s'il a été rejeté,
     // le navigateur n'aurait pas suivi le lien. On ouvre donc la modale ici.
     window.__openModal('/Pages/Applicants.Events/JobApplicationChildEventEdit.aspx?rwndrnd=' + Math.random());
+  });
+});
+
+document.querySelectorAll('a[id$="btnEventActionNew"]').forEach(function (b) {
+  b.addEventListener('click', function () {
+    window.__openModal('/Pages/Applicants.Events/JobApplicationChildEventEdit.aspx?rwndrnd=' + Math.random());
+  });
+});
+
+document.querySelectorAll('a[id$="btnSendMailNew"]').forEach(function (b) {
+  b.addEventListener('click', function () {
+    window.__openModal('/Pages/Correspondence/ActionMailLanguageChoicePage.aspx?rwndrnd=' + Math.random());
   });
 });
 

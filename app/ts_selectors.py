@@ -276,13 +276,43 @@ RECRUITER_TOOLS_ACTIONS = [
     "[id$='frmApplicantActions_SubformTable'] >> text=/actions/i",
 ]
 
-# Actions de workflow listées dans le panneau Outils. Beaucoup déclenchent un confirm()
-# JavaScript natif : Playwright le REJETTE par défaut, il faut un handler `page.on("dialog")`.
+# LE bouton qui ouvre « Création d'un événement » : il est porté par la LIGNE de la
+# candidature, colonne « Action », intitulé « Effectuer une action sur la candidature ».
+# C'est le seul chemin qui permette de créer un événement AVEC son commentaire en une passe,
+# et il est intrinsèquement lié à la candidature de sa ligne — donc sans ambiguïté de cible.
+EVENT_ACTION_BUTTON = ["a[id$='btnEventActionNew']"]
+
+# Autres boutons de la même ligne. Listés pour qu'on sache les reconnaître et les ÉVITER :
+#   btnSendMailNew  « Correspondre avec le candidat » -> envoie un courrier
+#   btnDocumentReader / btnEventDetailsNew -> lecture seule, hors périmètre du bot
+ROW_SEND_MAIL_BUTTON = ["a[id$='btnSendMailNew']"]
+
+# Actions de workflow du panneau Outils. LE BOT NE LES UTILISE PAS : selon le paramétrage,
+# une action peut (a) créer l'événement directement SANS proposer de commentaire, ou
+# (b) ouvrir un envoi de courrier au candidat. Aucune n'ouvre un formulaire de saisie.
+# Conservées pour la lecture du référentiel et le diagnostic. Beaucoup déclenchent un
+# confirm() natif : Playwright le REJETTE par défaut, d'où le handler `page.on("dialog")`.
 WORKFLOW_ACTION_LINKS = ["a[id*='lblJobAppActionName']"]
 
 # L'iframe qui porte le formulaire d'événement. `rwndrnd` est un anti-cache aléatoire :
 # cibler par le nom de la page, jamais par l'URL complète.
-EVENT_DIALOG_FRAME = ["iframe[src*='JobApplicationChildEventEdit']"]
+# L'iframe du formulaire. Le second candidat couvre la navigation INTERNE de l'iframe :
+# en passant de la vue à l'édition (bouton « Modifier »), le document chargé devient
+# `...Edit.aspx` alors que l'attribut `src` continue d'indiquer `...View.aspx`.
+EVENT_DIALOG_FRAME = [
+    "iframe[src*='JobApplicationChildEventEdit']",
+    "iframe[src*='JobApplicationChildEvent']",
+]
+
+# Vue d'un événement : c'est LA qu'apparaît le commentaire, sous le libellé « Motif ».
+# Ouverte en cliquant le titre de l'événement dans l'historique (`lnkEventTitle`).
+EVENT_VIEW_FRAME = ["iframe[src*='JobApplicationChildEventView']"]
+EVENT_VIEW_CLOSE = ["input[id$='btnClose']"]
+# Le commentaire y est précédé de ce libellé.
+EVENT_VIEW_COMMENT_LABEL = "motif"
+
+# Boutons de la vue. `btnDelete` supprime l'événement : LE BOT NE DOIT JAMAIS LE CLIQUER.
+EVENT_VIEW_DELETE = ["input[id$='btnDelete']"]
 
 # Modales que le bot NE DOIT JAMAIS VALIDER. Certaines actions de workflow n'ouvrent pas le
 # formulaire d'événement mais un parcours d'envoi de courrier au candidat : l'écran de choix

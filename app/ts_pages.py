@@ -755,40 +755,28 @@ class EventDialog:
             logger.warning(f"mail_dialog_cancel_failed error={type(error).__name__}")
         raise MailDialogOpened("cette action ouvre un envoi de courrier au candidat, pas un formulaire d'événement")
 
-    def open_from_workflow_action(self, action_label: str | None = None) -> FrameLocator:
-        """Ouvre le formulaire d'événement via une action du panneau Outils.
+    def open_on_selected_application(self) -> FrameLocator:
+        """Ouvre « Création d'un événement » depuis la ligne de la candidature sélectionnée.
 
-        Le panneau Outils ne propose qu'un sous-ensemble des types du référentiel (89 actions
-        pour 105 types sur le tenant de recette) : un type demandé peut n'avoir aucune action
-        dédiée. L'action ne sert donc qu'à **ouvrir** le formulaire ; le type effectif est
-        ensuite choisi dans la liste déroulante, qui porte le référentiel complet.
+        Le bouton « Effectuer une action sur la candidature » (`btnEventActionNew`), porté par
+        la ligne elle-même, est le SEUL chemin qui ouvre un formulaire de saisie complet —
+        type, date et commentaire — et qui crée l'événement en une seule passe.
 
-        On privilégie l'action homonyme quand elle existe (le formulaire s'ouvre alors déjà
-        sur le bon type), sinon on prend la première action disponible.
+        Les actions du panneau Outils ne conviennent pas : selon le paramétrage, elles créent
+        l'événement **sans proposer de commentaire**, ou ouvrent un **envoi de courrier** au
+        candidat. Vérifié sur le tenant (docs/DISCOVERY.md).
 
-        Un `confirm()` natif peut survenir : il est accepté par le handler du scraper.
+        Ce bouton appartenant à la ligne de la candidature, la cible est sans ambiguïté :
+        aucun risque d'écrire sur une autre candidature du même candidat.
         """
-        links = self.page.locator(sel.WORKFLOW_ACTION_LINKS[0])
-        count = links.count()
-        if count == 0:
-            raise SelectorNotFound("aucune action de workflow sur la fiche")
-
-        target = None
-        if action_label:
-            wanted = normalize_text(action_label)
-            for index in range(count):
-                item = links.nth(index)
-                try:
-                    if normalize_text(item.inner_text(timeout=2000)) == wanted:
-                        target = item
-                        break
-                except Exception:
-                    continue
-        if target is None:
-            logger.info("aucune action homonyme : ouverture par la première action disponible")
-            target = links.first
-
-        target.click(timeout=self._t())
+        row = self.page.locator(sel.SELECTED_APPLICATION_ROW[0])
+        if row.count() != 1:
+            raise SelectorNotFound(
+                "aucune candidature sélectionnée : le bouton d'action appartient à sa ligne "
+                "(sélectionner la candidature avant d'ouvrir le formulaire)"
+            )
+        button = first_locator(self.page, sel.EVENT_ACTION_BUTTON, self._t(), scope=row.first)
+        button.click(timeout=self._t())
         return self.wait_open()
 
     def type_options(self, frame: FrameLocator | None = None) -> list[dict]:
