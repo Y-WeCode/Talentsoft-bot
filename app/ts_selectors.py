@@ -70,12 +70,20 @@ LOGIN_SUBMIT = [
 # pour un compte technique). Listée pour mémoire, jamais cliquée.
 LOGIN_REMEMBER_ME = ["input[name='RememberMe']"]
 
+# Élargi après un échec en production où aucune erreur n'était détectée alors que le login
+# n'aboutissait pas : sans message reconnu, le bot ne peut pas distinguer un mot de passe
+# refusé d'un formulaire mal soumis, et répond `login_not_confirmed` dans les deux cas.
 LOGIN_ERROR = [
     "[role='alert']",
     ".validation-summary-errors",
     ".field-validation-error",
     ".alert-danger",
+    ".alert-warning",
+    ".alert",
     ".login-error, .error-message",
+    "[class*='error' i]:visible",
+    "[class*='invalid' i]:visible",
+    "text=/identifiant ou mot de passe|mot de passe incorrect|compte verrouill|compte bloqu|trop de tentatives|invalid credentials|account locked/i",
 ]
 
 # --- Choix du compte (écran de fédération intermédiaire) -------------------------------

@@ -148,6 +148,15 @@ def browser_executable_path() -> str:
     return env_str("BROWSER_EXECUTABLE_PATH", "")
 
 
+def browser_user_agent() -> str:
+    """User-agent imposé au navigateur. Vide : valeur de bureau par défaut en headless.
+
+    En headless, Chromium annonce « HeadlessChrome », que des fournisseurs d'identité
+    refusent sans message d'erreur (docs/DISCOVERY.md).
+    """
+    return env_str("BROWSER_USER_AGENT", "")
+
+
 def action_timeout_ms() -> int:
     return env_int("ACTION_TIMEOUT_MS", 30000, minimum=1000)
 

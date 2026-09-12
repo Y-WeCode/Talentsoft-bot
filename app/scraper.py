@@ -70,6 +70,14 @@ _FATAL_FRAGMENTS = (
 )
 
 
+# User-agent d'un Chromium de bureau. Repris tel quel en headless, où Playwright annoncerait
+# sinon « HeadlessChrome ». La version suit celle de l'image Playwright du Dockerfile ; un
+# décalage mineur est sans conséquence, seul le mot « Headless » pose problème.
+_DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
+)
+
+
 class BrowserFatalError(Exception):
     """Le navigateur ou le contexte est perdu : la session doit être recyclée."""
 
@@ -134,6 +142,17 @@ class TalentsoftBot:
             "locale": "fr-FR",
             "viewport": {"width": 1440, "height": 900},
         }
+        # En mode headless, Chromium annonce « HeadlessChrome » dans son user-agent. Des
+        # fournisseurs d'identité refusent ces navigateurs — sans message d'erreur : le
+        # formulaire est accepté, mais l'authentification n'aboutit pas. On présente donc le
+        # même Chromium sous son user-agent normal.
+        # Ce n'est pas un contournement de protection : le bot s'authentifie avec un compte
+        # applicatif légitime, sur un tenant dont l'exploitant demande cette automatisation.
+        user_agent = config.browser_user_agent()
+        if user_agent:
+            context_kwargs["user_agent"] = user_agent
+        elif config.headless_mode():
+            context_kwargs["user_agent"] = _DEFAULT_USER_AGENT
         state_path = config.storage_state_path()
         if os.path.exists(state_path):
             context_kwargs["storage_state"] = state_path
@@ -337,7 +356,13 @@ class TalentsoftBot:
             self.page.wait_for_timeout(500)
 
         if not landed:
-            raise LoginError(f"login_not_confirmed: parcours SSO non abouti (url={self._safe_url()})")
+            # Capture utile au diagnostic : un champ mot de passe s'affiche masqué, sa valeur
+            # n'apparaît donc pas. Activée seulement si SCREENSHOTS_ENABLED.
+            self.screenshot("login_not_confirmed")
+            raise LoginError(
+                f"login_not_confirmed: parcours SSO non abouti (url={self._safe_url()}, "
+                f"page={self._login_failure_hint(login_page)})"
+            )
 
         # Rejoindre le Back Office : c'est le seul périmètre où le bot travaille, et le seul
         # où ses marqueurs d'authentification ont un sens.
@@ -351,6 +376,26 @@ class TalentsoftBot:
         self._authenticated = True
         self.save_storage_state()
         logger.info("login_success")
+
+    def _login_failure_hint(self, login_page: LoginPage) -> str:
+        """Ce que la page dit au moment où le login n'aboutit pas.
+
+        Sans cet indice, un échec se résume à « on est resté sur l'IdP », ce qui ne distingue
+        pas un mot de passe refusé d'un formulaire mal soumis. On se limite au texte
+        **visible** de la page de connexion : il ne contient ni identifiant saisi (la valeur
+        d'un champ n'est pas du texte), ni donnée candidat, l'authentification précédant
+        l'accès au moindre dossier.
+        """
+        detected = login_page.error_text()
+        if detected:
+            return f"erreur={detected[:120]!r}"
+        try:
+            visible = normalize_text(self.page.inner_text("body", timeout=3000))
+        except Exception:
+            return "texte indisponible"
+        # Le formulaire encore affiché est en soi une information : la soumission n'a rien donné.
+        still_form = "formulaire_toujours_affiché" if login_page.is_displayed() else "hors_formulaire"
+        return f"{still_form} texte={visible[:160]!r}"
 
     def _sso_completed(self, login_page: LoginPage) -> bool:
         """Le parcours d'authentification est-il sorti des écrans de connexion ?
