@@ -50,6 +50,10 @@ make deploy
 
 ## Contrat HTTP
 
+> **Pour écrire le client côté Hippolyte.ai, lire [docs/INTEGRATION.md](docs/INTEGRATION.md)** : guide
+> complet, avec le squelette TypeScript, le traitement des cas limites et la checklist de mise en
+> production. La section ci-dessous n'en est que le résumé.
+
 Tous les endpoints métier exigent `Authorization: Bearer $API_TOKEN`.
 
 | Méthode | Route | Rôle |
@@ -244,3 +248,5 @@ bascule du `TalentsoftAdapter` vers le bot pour les événements typés et les d
 
 Ce client devra fournir `candidate_email` et `offer_id`, et traiter explicitement `category_occupied` et
 `unverified` : ce sont les deux cas où une intervention humaine peut être nécessaire.
+
+Tout est détaillé dans **[docs/INTEGRATION.md](docs/INTEGRATION.md)**.
