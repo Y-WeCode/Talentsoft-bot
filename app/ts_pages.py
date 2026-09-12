@@ -12,7 +12,6 @@ Particularités du Back Office, relevées en phase 0 (docs/DISCOVERY.md) :
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 import time
@@ -287,16 +286,20 @@ class LoginPage:
         if count == 0:
             raise LoginError("account_choice_no_option")
 
-        labels, values = [], []
-        for index in range(count):
-            radio = radios.nth(index)
-            try:
-                labels.append(radio.evaluate("el => (el.closest('label,a,div')||el).innerText || ''"))
-            except Exception:
-                labels.append("")
-            # La `value` du radio est un identifiant ASCII (`airfrance.fr`), bien plus sûr à
-            # transporter dans un .env que le libellé affiché, qui est accentué.
-            values.append((radio.get_attribute("value") or radio.get_attribute("id") or "").strip())
+        # Tout est relevé en UNE évaluation : interroger les options une par une multiplierait
+        # les allers-retours, et chacun peut expirer si la page bouge entre-temps.
+        options = self.page.evaluate(
+            """() => Array.from(document.querySelectorAll("input[type='radio']")).map(r => ({
+                id: r.id || '',
+                value: (r.value || '').trim(),
+                label: ((r.closest('label,a,div') || r).innerText || '').trim(),
+            }))"""
+        )
+        labels = [option["label"] for option in options]
+        ids = [option["id"] for option in options]
+        # La `value` du radio est un identifiant ASCII (`airfrance.fr`), bien plus sûr à
+        # transporter dans un .env que le libellé affiché, qui est accentué.
+        values = [(option["value"] or option["id"]).strip() for option in options]
 
         # Libellés et identifiants de compte applicatif, pas des données personnelles :
         # les journaliser est ce qui rend un échec de choix diagnosticable.
@@ -333,7 +336,8 @@ class LoginPage:
         else:
             raise LoginError(f"account_choice_ambiguous: {count} options, TS_ACCOUNT_CHOICE non renseigné")
 
-        self._select_account_option(radios.nth(target))
+        how = self._select_account_option(ids[target], values[target])
+        logger.info(f"account_choice_selected_via={how}")
 
         submit = first_locator(self.page, sel.ACCOUNT_CHOICE_SUBMIT, self._t())
         submit.click(timeout=self._t())
@@ -341,83 +345,54 @@ class LoginPage:
         logger.info(f"account_choice_submitted choice={chosen[:40]!r}")
         return chosen
 
-    def _select_account_option(self, radio: Locator) -> None:
-        """Coche l'option, quel que soit l'habillage du bouton radio.
+    def _select_account_option(self, radio_id: str, radio_value: str) -> str:
+        """Coche l'option de compte, en opérant DANS la page.
 
-        Trois tentatives, de la plus proche du geste humain à la plus directe : cliquer le
-        libellé visible, cocher le radio, forcer le cochage. Chaque tentative est bornée à
-        5 s — un radio masqué ferait sinon expirer tout le budget d'action sur la première.
+        Les gestes Playwright ne conviennent pas ici, et l'essai en production l'a montré :
+
+        - le radio porte `visibility: hidden` : ni `check()` ni `click()` ne l'atteignent ;
+        - son libellé est enveloppé dans un `<a href="#">` qui **intercepte** le clic, si bien
+          que cliquer `label[for]` ne coche rien ;
+        - ce clic fait néanmoins **bouger la page**, ce qui périme le locator : toute
+          vérification ultérieure via ce locator expire sur le timeout par défaut (30 s), et
+          trois gestes enchaînés coûtaient 90 s pour finir en échec.
+
+        On fait donc tout en une seule évaluation : retrouver l'option par son identifiant ou
+        sa valeur, la cocher, notifier la page, et rendre compte de l'état obtenu. Un seul
+        aller-retour, aucun locator à périmer.
+
+        Retourne le geste qui a abouti, pour le journal.
         """
-        if radio.is_checked():
-            return
+        script = """([wantedId, wantedValue]) => {
+            const radios = Array.from(document.querySelectorAll("input[type='radio']"));
+            const radio = radios.find(r => (wantedId && r.id === wantedId))
+                       || radios.find(r => (wantedValue && r.value === wantedValue));
+            if (!radio) return {ok: false, how: 'introuvable', count: radios.length};
 
-        container = radio.locator(sel.ACCOUNT_CHOICE_OPTION_CLICKABLE_FROM_RADIO)
-        radio_id = radio.get_attribute("id") or ""
-        # `label[for=...]` est le geste qui coche réellement un radio masqué : cliquer le
-        # conteneur ne suffit pas s'il n'établit pas lui-même l'association.
-        # La valeur est sérialisée en littéral quoté : sur le tenant, les identifiants
-        # contiennent un point (`airfrance.fr`), qu'un sélecteur non quoté lirait comme une classe.
-        label_for = self.page.locator(f"label[for={json.dumps(radio_id)}]") if radio_id else None
+            // `click()` appele dans la page coche ET laisse s'executer les gestionnaires,
+            // contrairement a un evenement synthetique, qui ne declenche pas le comportement
+            // par defaut du navigateur.
+            try { radio.click(); } catch (e) { /* poursuivre avec le repli */ }
+            if (radio.checked) return {ok: true, how: 'click'};
 
-        # Un radio invisible ne peut être ni coché ni cliqué par Playwright : tenter les gestes
-        # physiques ne ferait qu'épuiser un timeout chacun — une vingtaine de secondes perdues
-        # à chaque connexion. On ne les propose que si l'élément est réellement actionnable.
+            // Repli : forcer l'etat, puis prevenir la page comme l'aurait fait un vrai clic.
+            radio.checked = true;
+            radio.dispatchEvent(new Event('input', {bubbles: true}));
+            radio.dispatchEvent(new Event('change', {bubbles: true}));
+            return {ok: radio.checked, how: radio.checked ? 'checked' : 'sans_effet'};
+        }"""
         try:
-            physically_actionable = radio.is_visible()
-        except Exception:
-            physically_actionable = False
+            result = self.page.evaluate(script, [radio_id, radio_value])
+        except Exception as error:
+            raise LoginError(
+                f"account_choice_not_selectable: evaluation impossible ({type(error).__name__})"
+            ) from error
 
-        step_timeout = min(self._t(), 3000)
-        attempts: list[tuple[str, object]] = []
-        if label_for is not None:
-            # Le libellé, lui, est visible : c'est le geste d'un recruteur, à tenter en premier.
-            attempts.append(("label_for", lambda: label_for.first.click(timeout=step_timeout)))
-        if physically_actionable:
-            attempts += [
-                ("container", lambda: container.first.click(timeout=step_timeout)),
-                ("check", lambda: radio.check(timeout=step_timeout)),
-            ]
-        else:
-            logger.info("account_choice: radio non visible, gestes physiques ignorés")
-        if physically_actionable:
-            attempts.append(("force", lambda: radio.check(force=True, timeout=step_timeout)))
-        attempts += [
-            # Dernier recours, et le seul qui aboutisse sur ce tenant : appeler `click()` DANS
-            # la page. Le radio porte `visibility: hidden` et son libellé est enveloppé dans un
-            # `<a href="#">` qui intercepte le clic ; aucune interaction physique ne le coche.
-            # `dispatch_event("click")` ne suffit pas non plus : un événement synthétique ne
-            # déclenche pas le comportement par défaut du navigateur. `el.click()` si, et il
-            # laisse les gestionnaires de la page s'exécuter — contrairement à `el.checked = true`.
-            ("js_click", lambda: radio.evaluate("el => el.click()")),
-            # Filet ultime : forcer l'état et notifier la page, si `click()` était neutralisé.
-            (
-                "js_checked",
-                lambda: radio.evaluate(
-                    "el => { el.checked = true;"
-                    " el.dispatchEvent(new Event('input', {bubbles: true}));"
-                    " el.dispatchEvent(new Event('change', {bubbles: true})); }"
-                ),
-            ),
-        ]
-
-        # Le détail par tentative est conservé : sans lui, l'échec se résume à un type
-        # d'exception qui ne dit ni quel geste a été tenté, ni pourquoi il n'a pas abouti.
-        journal: list[str] = []
-        for name, action in attempts:
-            try:
-                action()
-            except Exception as error:  # option masquée, recouverte, ou non actionnable
-                journal.append(f"{name}:{type(error).__name__}")
-                continue
-            try:
-                if radio.is_checked():
-                    logger.info(f"account_choice_selected_via={name}")
-                    return
-                journal.append(f"{name}:sans_effet")
-            except Exception as error:
-                journal.append(f"{name}:is_checked_{type(error).__name__}")
-
-        raise LoginError(f"account_choice_not_selectable: aucun geste n'a coché l'option [{', '.join(journal)}]")
+        if not result.get("ok"):
+            raise LoginError(
+                f"account_choice_not_selectable: {result.get('how')} (options vues: {result.get('count')})"
+            )
+        return str(result.get("how"))
 
     def submit_credentials(self, username: str, password: str) -> None:
         username_input = first_locator(self.page, sel.LOGIN_USERNAME, self._t())
