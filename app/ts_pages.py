@@ -395,6 +395,15 @@ class LoginPage:
         return str(result.get("how"))
 
     def submit_credentials(self, username: str, password: str) -> None:
+        """Renseigne le formulaire de l'IdP et le soumet, en vérifiant que la soumission part.
+
+        Constaté en production : cliquer le bouton « Connexion » remplissait le formulaire sans
+        rien envoyer — la capture d'écran de l'échec montrait les deux champs encore saisis,
+        alors qu'un POST rejeté par ASP.NET réaffiche la page avec le mot de passe vidé.
+
+        On tente donc plusieurs gestes, du plus proche de l'utilisateur au plus direct, et on
+        vérifie à chaque fois que la page a réellement quitté le formulaire.
+        """
         username_input = first_locator(self.page, sel.LOGIN_USERNAME, self._t())
         username_input.fill(username, timeout=self._t())
         password_input = first_locator(self.page, sel.LOGIN_PASSWORD, self._t())
@@ -403,8 +412,72 @@ class LoginPage:
         typed_length = len(password_input.input_value(timeout=self._t()))
         if typed_length != len(password):
             raise LoginError("password_fill_mismatch")
-        submit = first_locator(self.page, sel.LOGIN_SUBMIT, self._t())
-        submit.click(timeout=self._t())
+
+        attempts = [
+            ("bouton", self._submit_by_button),
+            # Entrée dans le champ mot de passe : le geste naturel, et il emprunte la
+            # soumission native du navigateur plutôt que le gestionnaire du bouton.
+            ("entree", lambda: password_input.press("Enter", timeout=min(self._t(), 5000))),
+            # Dernier recours : demander au formulaire de se soumettre lui-même.
+            # `requestSubmit()` déclenche la validation et l'événement `submit`, contrairement
+            # à `submit()` qui les court-circuiterait.
+            ("request_submit", self._submit_by_form),
+        ]
+
+        journal: list[str] = []
+        for name, action in attempts:
+            try:
+                action()
+            except Exception as error:
+                journal.append(f"{name}:{type(error).__name__}")
+                continue
+            if self._submission_left_the_form():
+                logger.info(f"login_submitted_via={name}")
+                return
+            journal.append(f"{name}:sans_effet")
+
+        raise LoginError(f"login_form_not_submitted: aucun geste n'a envoyé le formulaire [{', '.join(journal)}]")
+
+    def _submit_by_button(self) -> None:
+        submit = first_locator(self.page, sel.LOGIN_SUBMIT, min(self._t(), 5000))
+        submit.click(timeout=min(self._t(), 5000))
+
+    def _submit_by_form(self) -> None:
+        submitted = self.page.evaluate(
+            """() => {
+                const field = document.querySelector("input[type='password']");
+                const form = field && field.form;
+                if (!form) return false;
+                if (typeof form.requestSubmit === 'function') { form.requestSubmit(); return true; }
+                form.submit();
+                return true;
+            }"""
+        )
+        if not submitted:
+            raise SelectorNotFound("aucun formulaire ne porte le champ mot de passe")
+
+    def _submission_left_the_form(self) -> bool:
+        """La page a-t-elle quitté le formulaire de connexion ?
+
+        Un formulaire toujours affiché avec ses champs renseignés signale une soumission qui
+        n'est jamais partie ; un POST rejeté, lui, revient avec le mot de passe vidé.
+        """
+        # 4 s suffisent a constater une navigation ; au-dela on paierait ce delai a chaque
+        # geste infructueux, et a chaque connexion du bot.
+        deadline = time.monotonic() + 4.0
+        while time.monotonic() < deadline:
+            try:
+                if not self.is_displayed():
+                    return True
+                password = self.page.locator(sel.LOGIN_PASSWORD[0]).first
+                if password.count() and not password.input_value(timeout=2000):
+                    # Formulaire réaffiché mais vidé : la soumission est bien partie, et c'est
+                    # le serveur qui l'a rejetée. L'appelant le constatera via le message d'erreur.
+                    return True
+            except Exception:
+                return True  # la page a changé sous nos pieds : la soumission est partie
+            self.page.wait_for_timeout(400)
+        return False
 
 
 class GlobalSearch:
