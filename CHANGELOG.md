@@ -21,6 +21,9 @@ Phase 0 réalisée sur le tenant de recette, et mise en conformité du code avec
 - Routes à identifiant supprimées : `/applications/events` et `/applications/documents` (plus de `{id}`).
 - `/applications/documents` n'accepte plus qu'**un seul fichier** par appel (une catégorie = un champ).
 - Nouveaux résultats d'action : `category_occupied`, `comment_too_long`, `multiple_documents_same_category`.
+- Mapping HTTP des échecs d'identification de candidature : candidat introuvable et candidat sans
+  candidature sur l'offre donnent `404` ; plusieurs candidats pour un email donnent `409`. Sans ce mapping,
+  ces cas remontaient en `500` et le client ne pouvait pas les distinguer d'une panne.
 - Les événements vérifiés portent `"verification": "weak"` : le commentaire n'étant pas relisible, la
   relecture ne peut pas certifier que la ligne observée est celle du bot.
 - L'email du candidat n'apparaît jamais en clair dans les réponses ni dans les logs (empreinte seulement).
