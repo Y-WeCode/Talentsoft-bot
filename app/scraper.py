@@ -291,11 +291,60 @@ class TalentsoftBot:
         self._dismiss_cookies()
         login_page = self._login_page()
         if login_page.is_authenticated_view():
-            # Session restaurée depuis storage_state.
+            # Session restaurée depuis storage_state, et déjà sur le Back Office.
             self._authenticated = True
             self.save_storage_state()
             return
+        if self._resume_restored_session(login_page):
+            return
         self.login()
+
+    def _resume_restored_session(self, login_page: LoginPage) -> bool:
+        """Reprend une session restaurée depuis le disque, ou l'abandonne proprement.
+
+        Avec des cookies encore valides, le tenant renvoie la racine du Back Office vers l'espace
+        collaborateur tant que la session applicative du BO n'est pas ouverte. Il faut donc y
+        **entrer**, pas se réauthentifier : l'IdP nous tient pour connecté et ne présente aucun
+        formulaire, si bien que `login()` échouait sur `login_form_not_found` — en quelques
+        secondes, sans qu'aucune trace n'explique pourquoi.
+
+        Des cookies périmés laissent au contraire une page qu'on ne reconnaît pas. Les garder
+        ferait échouer le login complet de la même façon : on repart d'un contexte vierge.
+
+        Retourne True si la session est reprise et le Back Office atteint.
+        """
+        if login_page.is_displayed() or login_page.is_account_choice_displayed():
+            return False  # L'IdP nous parle : parcours de connexion normal.
+
+        if self._sso_completed(login_page):
+            logger.info("restored_session landing=hors_back_office")
+            self._enter_back_office()
+            self._dismiss_cookies()
+            if login_page.is_authenticated_view():
+                self._authenticated = True
+                self.save_storage_state()
+                logger.info("restored_session resumed=true")
+                return True
+
+        self._drop_restored_session()
+        return False
+
+    def _drop_restored_session(self) -> None:
+        """Repart d'un contexte vierge.
+
+        Supprimer le fichier ne suffit pas : ses cookies sont déjà chargés dans le contexte
+        courant, et resteraient en vigueur pour tout le job.
+        """
+        logger.warning("restored_session discarded=true : reprise impossible, login complet")
+        self.discard_storage_state()
+        try:
+            self.context.clear_cookies()
+        except Exception as error:
+            # Le libellé évite le vocabulaire des secrets : un garde-fou interdit qu'il
+            # apparaisse dans une ligne de log de ce fichier (test_no_secret_logging_in_scraper).
+            logger.warning(f"session_state_clear_failed error={type(error).__name__}")
+        self._goto(self.base_url + sel.LOGIN_PATH)
+        self._dismiss_cookies()
 
     def login(self) -> None:
         """Parcours fédéré : choix du compte puis identifiant / mot de passe."""
@@ -603,7 +652,17 @@ class TalentsoftBot:
                     raise SessionExpired(f"session non rétablie après re-login (url={self._safe_url()})")
                 logger.info(f"session_expired_relogin url={self._safe_url()}")
                 self._authenticated = False
-                self.login()
+                try:
+                    # `ensure_logged_in` et non `login` : quand la session applicative du Back
+                    # Office expire, le tenant nous renvoie vers l'espace collaborateur tout en
+                    # nous tenant pour authentifiés. Le remède est d'y ré-entrer, pas de
+                    # redemander des identifiants — l'IdP ne présenterait aucun formulaire.
+                    self.ensure_logged_in()
+                except LoginError as error:
+                    # Reprise impossible. Laisser la seconde passe conclure à une session perdue
+                    # donne le bon diagnostic ; remonter une erreur de login désignerait à tort
+                    # les identifiants, et enverrait chercher au mauvais endroit.
+                    logger.warning(f"session_recovery_failed reason={error}")
                 continue
             break
 

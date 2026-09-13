@@ -51,6 +51,20 @@ dans l'api pendant que le worker tenait son propre navigateur.
 
 ### Fiabilité
 
+- **Reprise d'une session restaurée qui atterrit hors du Back Office.** Au démarrage à froid avec
+  un `storage_state` encore valide côté fournisseur d'identité mais dont la session applicative du
+  Back Office a expiré, le tenant renvoie la racine du BO vers l'espace collaborateur.
+  `ensure_logged_in` ne reconnaissait que les marqueurs du Back Office, concluait « pas
+  authentifié » et appelait `login()` — qui ne trouvait aucun formulaire, l'IdP nous tenant pour
+  connectés. Résultat : `login_form_not_found` en quelques secondes, sans trace exploitable, et
+  état `degraded` après trois tentatives. Le bot **entre** désormais dans le Back Office ; si les
+  cookies sont inexploitables il vide le contexte — supprimer le fichier ne suffit pas, ils y sont
+  déjà chargés — avant de repartir sur un login complet.
+- `open_application` faisait la même erreur dans sa reprise après expiration de session : il
+  appelait `login()` au lieu de `ensure_logged_in()`. Un échec de reprise laisse maintenant la
+  seconde passe conclure à `SessionExpired`, diagnostic exact, plutôt qu'une erreur de login qui
+  désignerait à tort les identifiants.
+
 - `mutation_started` n'est plus posé au lancement du job mais à la **première écriture réelle**, via un
   callback `on_mutation_started` appelé par le scraper juste avant la première soumission. Un job qui
   échouait au login devenait auparavant définitivement non rejouable, et laissait croire à une écriture.

@@ -60,6 +60,9 @@ class FakeServer:
         self.landed = False
         self.expire_to_landing = False
         self.back_office_opened = False
+        # Cookies restaures mais perimes : le tenant sert une page que le bot ne reconnait pas.
+        # Consommee une seule fois — une fois le contexte vide, le parcours normal reprend.
+        self.stale_restored_session = False
         self.blocked: list[str] = []
 
     def install(self, context):
@@ -108,6 +111,14 @@ class FakeServer:
                 content_type="text/html",
                 body=_page("home.html"),
                 headers={"Set-Cookie": "ts_session=1; path=/"},
+            )
+
+        if self.stale_restored_session:
+            self.stale_restored_session = False
+            return route.fulfill(
+                status=200,
+                content_type="text/html",
+                body="<!doctype html><html lang='fr'><body><p>Session invalide</p></body></html>",
             )
 
         if self.expire_to_landing:
@@ -500,6 +511,59 @@ def test_session_expiring_to_the_collaborator_space_is_detected(bot):
     bot._server.expire_to_landing = True
     with pytest.raises(SessionExpired):
         bot.open_application("candidat@example.com", "25152")
+
+
+def test_restored_session_landing_outside_the_back_office_is_resumed(bot_env):
+    """Demarrage a froid avec des cookies encore valides.
+
+    Le tenant renvoie la racine du Back Office vers l espace collaborateur tant que la session
+    applicative du BO n est pas ouverte. Il faut donc y ENTRER, pas se reauthentifier : l IdP
+    nous tient pour connecte et ne presente aucun formulaire. Sans cela le bot echouait sur
+    `login_form_not_found` en quelques secondes, sans trace exploitable — constate en recette.
+    """
+    from app.scraper import TalentsoftBot
+
+    instance = TalentsoftBot()
+    server = FakeServer()
+    # Session deja ouverte cote fournisseur d identite, session du Back Office fermee.
+    server.credentials_posted = True
+    server.install(instance.context)
+    try:
+        instance.ensure_logged_in()
+        assert instance.is_authenticated()
+        assert server.back_office_opened is True, "le point d entree du Back Office n a pas ete emprunte"
+        # Et surtout : aucune reauthentification. Reposter les identifiants ici serait inutile
+        # et ferait grimper le compteur d echecs de login pour rien.
+        assert not any(url.startswith(IDP) for url in server.requests)
+    finally:
+        instance.close()
+
+
+def test_unusable_restored_session_is_dropped_before_logging_in(bot_env):
+    """Cookies perimes : il faut vider le contexte, pas seulement le fichier.
+
+    Les cookies du storage_state sont deja charges dans le contexte courant. Les laisser en
+    place ferait echouer le login complet exactement de la meme facon.
+    """
+    from app import config
+    from app.scraper import TalentsoftBot
+
+    state = Path(config.storage_state_path())
+    state.parent.mkdir(parents=True, exist_ok=True)
+    state.write_text('{"cookies": [], "origins": []}', encoding="utf-8")
+
+    instance = TalentsoftBot()
+    server = FakeServer()
+    server.stale_restored_session = True
+    server.install(instance.context)
+    try:
+        instance.ensure_logged_in()
+        assert instance.is_authenticated()
+        # Le parcours de connexion complet a bien eu lieu apres l abandon.
+        assert server.account_chosen is True
+        assert server.credentials_posted is True
+    finally:
+        instance.close()
 
 
 def test_back_office_presence_is_checked_by_origin(bot):
