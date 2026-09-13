@@ -1,6 +1,19 @@
-"""Worker Redis : exécute les jobs navigateur hors du processus API.
+"""Worker Redis : **seul** processus autorisé à piloter un navigateur.
 
-Un job dont mutation_started est déjà vrai n'est jamais rejoué (anti doublon).
+Le tenant Talentsoft n'admet qu'une session active par compte technique. Tant que l'API ouvrait
+elle aussi un Chromium, les deux sessions se déconnectaient mutuellement et le bot finissait en
+état dégradé. L'API est donc devenue un guichet : elle empile ici, et attend le résultat.
+
+Deux conséquences directes :
+
+- la session est **réutilisée d'un job à l'autre** (`session_manager` la garde ouverte), ce qui
+  est la condition de tenue des dizaines de pushs par heure ;
+- le worker publie un battement de cœur, sans quoi l'API ne pourrait pas distinguer « personne
+  ne dépile » d'un job simplement long.
+
+Un job dont `mutation_started` est déjà vrai n'est jamais rejoué (anti doublon). Ce drapeau
+n'est plus posé au lancement mais à la **première écriture réelle** dans le Back Office : un job
+qui échoue au login n'a rien modifié, et reste donc rejouable.
 """
 
 from __future__ import annotations
@@ -8,6 +21,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import threading
 
 from dotenv import load_dotenv
 
@@ -16,10 +30,41 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("ts-worker")
 
-from app import idempotency, jobs, safety  # noqa: E402
-from app.main import run_with_session  # noqa: E402
+from app import browser_runner, config, idempotency, jobs, safety  # noqa: E402
 from app.scraper import sweep_old_traces  # noqa: E402
 from app.session_manager import session_manager  # noqa: E402
+
+HEARTBEAT_INTERVAL_SECONDS = 10
+
+_current_job_id: str | None = None
+_current_lock = threading.Lock()
+
+
+def _set_current_job(job_id: str | None) -> None:
+    global _current_job_id
+    with _current_lock:
+        _current_job_id = job_id
+
+
+def _heartbeat_payload() -> dict:
+    with _current_lock:
+        current = _current_job_id
+    return {"alive": True, "pid": os.getpid(), "current_job_id": current, **session_manager.status()}
+
+
+def _heartbeat_loop(stop: threading.Event) -> None:
+    """Publie l'état du worker depuis un thread dédié.
+
+    Surtout pas depuis la boucle `brpop` : pendant un push d'une minute le worker est bloqué
+    dans Playwright et n'y repasse pas. Le battement expirerait en plein job et l'API conclurait
+    à tort que le worker est mort.
+    """
+    while not stop.is_set():
+        try:
+            jobs.worker_heartbeat(_heartbeat_payload())
+        except Exception as error:
+            logger.warning(f"heartbeat_failed error={type(error).__name__}")
+        stop.wait(HEARTBEAT_INTERVAL_SECONDS)
 
 
 def _cleanup_documents(paths: list[str]) -> None:
@@ -31,58 +76,142 @@ def _cleanup_documents(paths: list[str]) -> None:
                 pass
 
 
+# --- Travaux ------------------------------------------------------------------------------
+
+
+def _run_update_application(job: dict, payload: dict) -> dict:
+    def on_mutation_started() -> None:
+        """Première écriture réelle : le job devient non rejouable, et on le persiste tout de suite.
+
+        Différer jusqu'à la fin du job perdrait l'information si le worker mourait pendant le
+        clic — précisément le scénario que ce drapeau existe pour couvrir.
+        """
+        job["mutation_started"] = True
+        jobs.save_job(job)
+        logger.info(f"job_id={job['id']} mutation_started=true")
+
+    def work(bot):
+        return bot.update_application(
+            candidate_email=payload["candidate_email"],
+            offer_id=payload["offer_id"],
+            event_type=payload.get("event_type"),
+            comment=payload.get("comment"),
+            event_date=payload.get("event_date"),
+            document_paths=payload.get("document_paths") or [],
+            document_category=payload.get("document_category"),
+            on_mutation_started=on_mutation_started,
+        )
+
+    update_info = browser_runner.run_with_session(
+        work, lock_timeout_seconds=config.browser_admitted_lock_timeout_seconds()
+    )
+    actions = (update_info or {}).get("actions") or {}
+    job["mutation_may_have_happened"] = safety.actions_may_have_mutated(actions)
+    return {"success": safety.actions_succeeded(actions), "update_details": update_info}
+
+
+def _run_list_events(payload: dict) -> dict:
+    offer = payload["offer_id"]
+
+    def work(bot):
+        return {"offer_id": offer, "events": bot.list_events(payload["candidate_email"], offer)}
+
+    return browser_runner.run_with_session(work, lock_timeout_seconds=config.browser_admitted_lock_timeout_seconds())
+
+
+def _run_referential(payload: dict, reader_name: str) -> dict:
+    def work(bot):
+        return {"values": getattr(bot, reader_name)(payload["candidate_email"], payload["offer_id"])}
+
+    return browser_runner.run_with_session(work, lock_timeout_seconds=config.browser_admitted_lock_timeout_seconds())
+
+
+def _run_selftest(payload: dict) -> dict:
+    def work(bot):
+        return bot.selftest(payload.get("candidate_email") or None, payload.get("offer_id") or None)
+
+    return browser_runner.run_with_session(work, lock_timeout_seconds=config.browser_admitted_lock_timeout_seconds())
+
+
+def _run_reset_session() -> dict:
+    """Sortie d'état dégradé. Ne touche pas au navigateur : `request_invalidate` est thread-safe
+    et la session sera fermée au prochain `get_bot`."""
+    session_manager.reset_degraded()
+    session_manager.request_invalidate("admin_reset")
+    return {"ok": True, **session_manager.status()}
+
+
+def _dispatch(job: dict, payload: dict) -> dict:
+    job_type = job.get("type")
+    if job_type == jobs.JOB_TYPE_UPDATE_APPLICATION:
+        return _run_update_application(job, payload)
+    if job_type == jobs.JOB_TYPE_LIST_EVENTS:
+        return _run_list_events(payload)
+    if job_type == jobs.JOB_TYPE_EVENT_TYPES:
+        return _run_referential(payload, "read_event_types")
+    if job_type == jobs.JOB_TYPE_DOCUMENT_CATEGORIES:
+        return _run_referential(payload, "read_document_categories")
+    if job_type == jobs.JOB_TYPE_SELFTEST:
+        return _run_selftest(payload)
+    if job_type == jobs.JOB_TYPE_RESET_SESSION:
+        return _run_reset_session()
+    raise browser_runner.BrowserJobError("unknown_job_type", f"type inconnu : {job_type}")
+
+
+def _fail(job: dict, code: str, detail: str) -> None:
+    job["status"] = "failed"
+    job["error_code"] = code
+    job["error_detail"] = detail
+    job["error"] = code  # champ historique, conservé pour les appelants existants
+    jobs.save_job(job)
+
+
 def _process_job(job: dict) -> None:
     job_id = job["id"]
-    job_type = job.get("type")
     payload = job.get("payload") or {}
+    is_mutation = job.get("type") not in jobs.READ_JOB_TYPES
 
     if job.get("mutation_started"):
         logger.warning(f"job_id={job_id} mutation_started already: pas de rejeu")
-        job["status"] = "failed"
-        job["error"] = "mutation_started_no_rejeu"
-        jobs.save_job(job)
+        _fail(job, "mutation_started_no_rejeu", "une écriture a déjà été engagée pour ce job")
         _cleanup_documents(payload.get("document_paths") or [])
         return
 
+    _set_current_job(job_id)
     job["status"] = "running"
-    job["mutation_started"] = True
     jobs.save_job(job)
 
     try:
-        if job_type == "update-application":
-
-            def work(bot):
-                return bot.update_application(
-                    candidate_email=payload["candidate_email"],
-                    offer_id=payload["offer_id"],
-                    event_type=payload.get("event_type"),
-                    comment=payload.get("comment"),
-                    event_date=payload.get("event_date"),
-                    document_paths=payload.get("document_paths") or [],
-                    document_category=payload.get("document_category"),
-                )
-
-            update_info = run_with_session(work, lock_timeout_seconds=1800)
-            success = safety.actions_succeeded((update_info or {}).get("actions") or {})
-            job["result"] = {"success": success, "update_details": update_info}
-            job["status"] = "completed"
-            if job.get("idempotency_key"):
-                idempotency.store_result(job["idempotency_key"], job["result"])
-        else:
-            job["status"] = "failed"
-            job["error"] = f"unknown_type:{job_type}"
-
+        job["result"] = _dispatch(job, payload)
+        job["status"] = "completed"
+        if is_mutation and job.get("idempotency_key"):
+            idempotency.store_result(job["idempotency_key"], job["result"])
         jobs.save_job(job)
-        logger.info(f"job_id={job_id} status={job['status']}")
+        logger.info(f"job_id={job_id} status=completed")
+    except browser_runner.BrowserJobError as error:
+        logger.warning(f"job_id={job_id} failed code={error.code}")
+        _fail(job, error.code, error.detail)
+        _release_idempotency(job)
     except Exception as error:
+        # Exception tierce : seul le type est conservé, son message peut porter une URL ou du HTML.
         logger.exception(f"job_id={job_id} failed: {type(error).__name__}")
-        job["status"] = "failed"
-        job["error"] = type(error).__name__
-        jobs.save_job(job)
-        if job.get("idempotency_key"):
-            idempotency.release(job["idempotency_key"])
+        _fail(job, "internal_error", type(error).__name__)
+        _release_idempotency(job)
     finally:
+        _set_current_job(None)
         _cleanup_documents(payload.get("document_paths") or [])
+
+
+def _release_idempotency(job: dict) -> None:
+    """Libère la clé si — et seulement si — aucune écriture n'a été engagée.
+
+    Après `mutation_started`, libérer la clé autoriserait un rejeu par-dessus une mutation déjà
+    partie : c'est exactement le doublon que l'idempotence existe pour empêcher.
+    """
+    if job.get("mutation_started"):
+        return
+    if job.get("idempotency_key"):
+        idempotency.release(job["idempotency_key"])
 
 
 def main() -> int:
@@ -91,17 +220,23 @@ def main() -> int:
         return 1
 
     sweep_old_traces()
-    logger.info("Worker démarré")
-    while True:
-        item = jobs.brpop_next_job(timeout_seconds=5)
-        if not item:
-            continue
-        _queue_name, job_id = item
-        job = jobs.get_job(job_id)
-        if not job:
-            logger.warning(f"missing job_id={job_id}")
-            continue
-        _process_job(job)
+    stop = threading.Event()
+    beat = threading.Thread(target=_heartbeat_loop, args=(stop,), name="heartbeat", daemon=True)
+    beat.start()
+    logger.info("Worker démarré : propriétaire unique du navigateur")
+    try:
+        while True:
+            item = jobs.brpop_next_job(timeout_seconds=5)
+            if not item:
+                continue
+            _queue_name, job_id = item
+            job = jobs.get_job(job_id)
+            if not job:
+                logger.warning(f"missing job_id={job_id}")
+                continue
+            _process_job(job)
+    finally:
+        stop.set()
 
 
 if __name__ == "__main__":

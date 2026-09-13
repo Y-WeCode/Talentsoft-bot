@@ -33,7 +33,10 @@ services:
       - ./traces:/app/traces
       - ./data:/app/data
       - ./uploads:/app/uploads
-      - ./state:/app/state
+      # State PROPRE a l'api, et inutilise des que le worker est la : deux navigateurs qui
+      # partagent le meme storage_state s'ecrasent les cookies l'un de l'autre, et le tenant
+      # n'admet de toute facon qu'une session par compte. Voir ARCHITECTURE.md.
+      - ./state-api:/app/state
     read_only: true
     tmpfs:
       - /tmp:size=512m
@@ -46,6 +49,10 @@ services:
     cpus: 2.0
     restart: unless-stopped
 
+  # Proprietaire UNIQUE du navigateur quand le profil « async » est actif. Dans ce cas l'api
+  # DOIT avoir TS_ASYNC_JOBS_ENABLED=true, sinon elle ouvrirait son propre Chromium en plus de
+  # celui-ci : deux sessions sur le meme compte technique, qui se deconnectent mutuellement.
+  # L'api journalise un avertissement si la configuration est incoherente.
   worker:
     build: .
     container_name: talentsoft_bot_worker
@@ -73,7 +80,14 @@ services:
       - ALL
     depends_on:
       - redis
-      - api
+    # Sante fondee sur la fraicheur du battement publie dans Redis : un worker vivant mais
+    # incapable d'ecrire dans Redis est aussi inutile qu'un worker mort.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; from app import jobs; sys.exit(0 if jobs.read_worker_status() else 1)"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
     shm_size: "1gb"
     mem_limit: 2g
     cpus: 2.0

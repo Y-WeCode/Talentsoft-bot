@@ -29,6 +29,7 @@ import logging
 import os
 import shutil
 import time
+from collections.abc import Callable
 from contextlib import contextmanager
 from datetime import date, datetime
 from pathlib import Path
@@ -120,6 +121,8 @@ class TalentsoftBot:
         self._tracing = False
         self._authenticated = False
         self._cookies_handled = False
+        self._mutation_callback: Callable[[], None] | None = None
+        self._mutation_notified = False
         self.deadline = Deadline(config.job_timeout_seconds())
         self._launch()
 
@@ -348,9 +351,12 @@ class TalentsoftBot:
             self._dismiss_cookies()
             error_text = login_page.error_text()
             if error_text:
+                # Le texte vient de la page du fournisseur d'identite : il reste dans le log.
+                # Le porter dans l'exception le ferait remonter jusqu'a la reponse HTTP, ou il
+                # exposerait du contenu tiers (URL, HTML, voire la valeur saisie).
                 logger.warning(f"login_rejected message={error_text[:120]!r}")
                 self.discard_storage_state()
-                raise LoginError(f"credentials_rejected: {error_text[:120]}")
+                raise LoginError("credentials_rejected")
             if login_page.is_authenticated_view():
                 landed = True
                 break
@@ -616,6 +622,21 @@ class TalentsoftBot:
         logger.info(f"application_opened offer_id={offer_id}")
         return app_page, label
 
+    def _notify_mutation_started(self) -> None:
+        """Signale la première écriture réelle, une seule fois par job.
+
+        Un échec de notification ne doit pas faire échouer une mutation déjà engagée : on
+        journalise et on poursuit. Le pire cas est un job rejouable à tort, que l'idempotence
+        côté appelant rattrape.
+        """
+        if self._mutation_notified or self._mutation_callback is None:
+            return
+        self._mutation_notified = True
+        try:
+            self._mutation_callback()
+        except Exception as error:
+            logger.warning(f"mutation_started_callback_failed error={type(error).__name__}")
+
     # --- Actions -----------------------------------------------------------------------
 
     def add_event(
@@ -660,6 +681,7 @@ class TalentsoftBot:
 
         result["event_type"] = chosen or event_type
         result["mutation_started"] = True
+        self._notify_mutation_started()
         dialog.submit(frame)
 
         if self._verify_event_added(app_page, offer_id, signature, before):
@@ -755,6 +777,7 @@ class TalentsoftBot:
             resolved = dialog.set_files(frame, {category: path})
             item["category"] = resolved.get(category, category)
             item["mutation_started"] = True
+            self._notify_mutation_started()
             dialog.submit(frame)
             if self._verify_attachment_present(app_page, display_name, item["category"]):
                 item.update({"ok": True, "verified": True})
@@ -802,8 +825,17 @@ class TalentsoftBot:
         event_date: str | None = None,
         document_paths: list[str] | None = None,
         document_category: str | None = None,
+        on_mutation_started: Callable[[], None] | None = None,
     ) -> dict:
-        """Événement + documents sur une candidature. Retourne le détail par action."""
+        """Événement + documents sur une candidature. Retourne le détail par action.
+
+        `on_mutation_started` est appelé **une seule fois**, juste avant la première écriture
+        réelle dans le Back Office. Il permet à l'appelant de ne marquer son job comme
+        irrécupérable qu'à partir de cet instant : un échec de login, de recherche ou de
+        sélection n'a rien modifié et reste rejouable.
+        """
+        self._mutation_callback = on_mutation_started
+        self._mutation_notified = False
         self.new_job()
         self.start_trace()
         actions: dict = {}
@@ -849,6 +881,7 @@ class TalentsoftBot:
             self.screenshot("job_failed")
             raise
         finally:
+            self._mutation_callback = None
             trace_path = self.stop_trace(keep=failed, name="update_application")
             if trace_path:
                 logger.info(f"trace_saved path={trace_path}")

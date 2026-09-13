@@ -1,5 +1,69 @@
 # Changelog
 
+## 0.3.0 (2026-09-13)
+
+Un seul navigateur pour tout le déploiement, piloté par une file. **Un `202` peut désormais répondre à un
+appel synchrone** : c'est le seul changement de contrat pour l'appelant.
+
+### Le problème corrigé
+
+L'api et le worker ouvraient **chacun leur Chromium**, avec le même compte technique. Le tenant n'admettant
+qu'une session active par compte, la seconde connexion invalidait la première ; le processus lésé relançait
+un login, qui invalidait celle de l'autre, jusqu'à épuiser `LOGIN_MAX_FAILURES` et basculer en `degraded`.
+
+`browser_lock.py` repose sur un `threading.Lock()`, qui ne franchit pas la frontière de processus : il ne
+sérialisait donc rien entre les deux. Et `?async=1` n'existant que sur `/update-application`, toutes les
+autres routes — `/selftest` en tête, que la documentation recommande de planifier en cron — s'exécutaient
+dans l'api pendant que le worker tenait son propre navigateur.
+
+### Architecture
+
+- **Un déploiement = un propriétaire de navigateur** (`config.browser_owner()`) : le `worker` dès que
+  `TS_ASYNC_JOBS_ENABLED=true`, l'`api` sinon (mono-processus : dev, tests, petites installations).
+- L'api ne construit plus jamais de `TalentsoftBot` en mode worker. Un test paramétré sur **toutes** les
+  routes navigateur le vérifie, pour qu'une régression soit un test rouge et non une déconnexion en recette.
+- La file `ts:jobs:read`, jusqu'ici consommée mais jamais alimentée, porte les lectures et les référentiels.
+  `BRPOP` la sert **avant** `ts:jobs:push` : une lecture ne patiente pas derrière vingt pushs.
+- Nouveau `app/browser_runner.py` : le worker n'importe plus `app.main`, et donc ne construit plus une
+  application FastAPI pour exécuter un job.
+- Attente d'un résultat par `BLPOP` sur une clé de complétion, sans scrutation.
+- Le worker publie un battement de cœur depuis un **thread dédié** — pas depuis sa boucle de jobs, qu'un
+  push d'une minute ne traverse pas.
+
+### Contrat HTTP
+
+- **`202` sur dépassement d'attente** (`SYNC_WAIT_TIMEOUT_SECONDS`, 120 s) avec `job_id`, `Location` et
+  `Retry-After`, là où un `500` survenait auparavant. Volontairement pas un `5xx` : à cet instant l'écriture
+  est peut-être en cours, et un `5xx` inviterait à rejouer.
+- Rejeu d'une clé d'idempotence dont le job tourne encore : `202` avec le **même** `job_id`, au lieu du `409`
+  inexploitable.
+- `503` + `Retry-After` quand le worker est absent ou sa session `degraded`, sans rien empiler.
+- `GET /jobs/{id}` expose `error_code` (stable, analysable) et `error_detail` (diagnostic humain) au lieu du
+  seul `"HTTPException"`, ainsi que `mutation_may_have_happened`.
+- `GET /` expose `browser_owner`, un bloc `worker` et la profondeur des files ; il répond `200` même quand
+  Redis est injoignable, avec `worker.alive = false`.
+- `POST /admin/reset-session` en mode worker : `202`, la demande étant enfilée en **lecture** pour rester
+  possible quand la file de pushs est saturée.
+
+### Fiabilité
+
+- `mutation_started` n'est plus posé au lancement du job mais à la **première écriture réelle**, via un
+  callback `on_mutation_started` appelé par le scraper juste avant la première soumission. Un job qui
+  échouait au login devenait auparavant définitivement non rejouable, et laissait croire à une écriture.
+- La clé d'idempotence n'est libérée que si aucune écriture n'a été engagée.
+- Le chemin `?async=1` réserve désormais la clé d'idempotence, comme le chemin synchrone.
+- `LoginError` ne transporte plus le texte de la page du fournisseur d'identité : il reste dans le log. Ce
+  texte remontait jusqu'à la réponse HTTP depuis que les détails d'erreur sont exposés.
+
+### Infrastructure
+
+- `api` et `worker` n'écrivent plus dans le même `state/` : deux `storage_state.json` partagés
+  s'écrasaient mutuellement les cookies.
+- Healthcheck du worker fondé sur la fraîcheur de son battement ; `depends_on: api` retiré.
+- Avertissement `config_suspecte` au démarrage de l'api quand `REDIS_URL` est défini sans
+  `TS_ASYNC_JOBS_ENABLED` — configuration typique de la panne corrigée ici.
+- `make worker-status`.
+
 ## 0.2.0 (2026-09-12)
 
 Phase 0 réalisée sur le tenant de recette, et mise en conformité du code avec le Back Office réel.

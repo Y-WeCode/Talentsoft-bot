@@ -1,4 +1,18 @@
-"""File de jobs asynchrones (Redis). Désactivée par défaut (TS_ASYNC_JOBS_ENABLED)."""
+"""File de jobs Redis : le seul chemin entre l'API et le navigateur.
+
+Le worker est le **seul** processus à piloter Chromium (docs/DISCOVERY.md) : le tenant n'admet
+qu'une session active par compte, et deux navigateurs concurrents se déconnectaient mutuellement
+jusqu'à faire basculer le bot en état dégradé. L'API n'ouvre donc plus de navigateur : elle empile
+ici, et attend le résultat.
+
+Deux files, pour que les lectures ne patientent pas derrière les mutations :
+
+- `ts:jobs:read`  — lectures (historique, référentiels, selftest), **prioritaire**
+- `ts:jobs:push`  — mutations (événements, pièces jointes)
+
+`brpop` respecte l'ordre des clés qu'on lui passe : une consultation d'historique passe donc devant
+vingt pushs en attente.
+"""
 
 from __future__ import annotations
 
@@ -18,6 +32,40 @@ JOB_KEY_PREFIX = "ts:job:"
 IDEM_JOB_KEY_PREFIX = "ts:idemjob:"
 JOB_TTL_SECONDS = 86400
 
+# Clé de complétion, consommée par un BLPOP : l'API est réveillée dès que le worker a fini, sans
+# interroger Redis en boucle. Elle ne porte pas le résultat — celui-ci vit dans le job, qui est la
+# seule source de vérité et survit à la lecture.
+DONE_KEY_PREFIX = "ts:jobdone:"
+DONE_TTL_SECONDS = 3600
+
+# Battement de cœur du worker. L'API s'en sert pour refuser proprement (503) quand personne ne
+# dépile, plutôt que de laisser l'appelant attendre un résultat qui ne viendra pas.
+WORKER_HEARTBEAT_KEY = "ts:worker:heartbeat"
+WORKER_HEARTBEAT_TTL_SECONDS = 30
+
+# Types de job. Les lectures vont sur QUEUE_READ, les mutations sur QUEUE_PUSH.
+JOB_TYPE_UPDATE_APPLICATION = "update-application"
+JOB_TYPE_LIST_EVENTS = "list-events"
+JOB_TYPE_EVENT_TYPES = "referential-event-types"
+JOB_TYPE_DOCUMENT_CATEGORIES = "referential-document-categories"
+JOB_TYPE_SELFTEST = "selftest"
+JOB_TYPE_RESET_SESSION = "reset-session"
+
+READ_JOB_TYPES = frozenset(
+    {
+        JOB_TYPE_LIST_EVENTS,
+        JOB_TYPE_EVENT_TYPES,
+        JOB_TYPE_DOCUMENT_CATEGORIES,
+        JOB_TYPE_SELFTEST,
+        JOB_TYPE_RESET_SESSION,
+    }
+)
+
+
+def queue_for(job_type: str) -> str:
+    """File d'un type de job : les lectures passent devant les mutations."""
+    return QUEUE_READ if job_type in READ_JOB_TYPES else QUEUE_PUSH
+
 
 def is_async_jobs_enabled() -> bool:
     return config.async_jobs_enabled()
@@ -36,12 +84,22 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
-def _enqueue(job_type: str, payload: dict[str, Any], queue: str, idempotency_key: str | None) -> dict[str, Any]:
+def enqueue_job(
+    job_type: str,
+    payload: dict[str, Any],
+    idempotency_key: str | None = None,
+) -> dict[str, Any]:
+    """Empile un job et retourne son état initial.
+
+    Une clé d'idempotence déjà connue renvoie le job existant : deux appels identiques ne créent
+    jamais deux jobs, et donc jamais deux mutations.
+    """
     if not is_async_jobs_enabled():
         raise RuntimeError("Async jobs not enabled")
     r = _redis()
     if r is None:
         raise RuntimeError("REDIS_URL missing")
+    queue = queue_for(job_type)
 
     if idempotency_key:
         existing = r.get(f"{IDEM_JOB_KEY_PREFIX}{idempotency_key}")
@@ -93,7 +151,19 @@ def enqueue_update_application(
         "document_paths": document_paths,
         "document_category": document_category,
     }
-    return _enqueue("update-application", payload, QUEUE_PUSH, idempotency_key)
+    return enqueue_job(JOB_TYPE_UPDATE_APPLICATION, payload, idempotency_key)
+
+
+def job_id_for_idempotency_key(key: str) -> str | None:
+    """Job déjà créé sous cette clé d'idempotence, s'il existe.
+
+    Sert à répondre « voici ton job » plutôt que 409 quand l'appelant rejoue après une attente
+    expirée : le 409 lui dirait qu'une requête identique tourne, sans lui dire laquelle.
+    """
+    r = _redis()
+    if r is None:
+        return None
+    return r.get(f"{IDEM_JOB_KEY_PREFIX}{key}")
 
 
 def get_job(job_id: str) -> dict[str, Any] | None:
@@ -107,17 +177,90 @@ def get_job(job_id: str) -> dict[str, Any] | None:
 
 
 def save_job(job: dict[str, Any]) -> None:
+    """Persiste le job, et réveille l'appelant s'il est terminé.
+
+    La clé de complétion n'est poussée que sur un état final : une mise à jour intermédiaire
+    (`running`, `mutation_started`) ne doit pas faire croire à un résultat disponible.
+    """
     r = _redis()
     if r is None:
         return
     job["updated_at"] = _now_iso()
-    r.set(f"{JOB_KEY_PREFIX}{job['id']}", json.dumps(job), ex=JOB_TTL_SECONDS)
+    pipe = r.pipeline()
+    pipe.set(f"{JOB_KEY_PREFIX}{job['id']}", json.dumps(job), ex=JOB_TTL_SECONDS)
+    if job.get("status") in ("completed", "failed"):
+        pipe.lpush(f"{DONE_KEY_PREFIX}{job['id']}", job["status"])
+        pipe.expire(f"{DONE_KEY_PREFIX}{job['id']}", DONE_TTL_SECONDS)
+    pipe.execute()
+
+
+def wait_for_result(job_id: str, timeout_seconds: int) -> dict[str, Any] | None:
+    """Attend la fin d'un job. Retourne le job terminé, ou None si le délai est dépassé.
+
+    Bloque sur la clé de complétion plutôt que d'interroger Redis en boucle : la réponse part dès
+    que le worker a fini, sans latence de scrutation ni charge inutile.
+
+    Un `None` ne signifie pas l'échec : le job continue côté worker, et l'appelant reçoit son
+    identifiant pour le suivre.
+    """
+    r = _redis()
+    if r is None:
+        return None
+    # Le job a pu se terminer avant que l'on commence à attendre.
+    job = get_job(job_id)
+    if job and job.get("status") in ("completed", "failed"):
+        return job
+    if r.blpop(f"{DONE_KEY_PREFIX}{job_id}", timeout=max(1, timeout_seconds)) is None:
+        # Le jeton de complétion n'est poussé qu'une fois : si deux appels attendent le même job,
+        # le second ne sera pas réveillé. Une relecture lève cette ambiguïté sans coût.
+        job = get_job(job_id)
+        return job if job and job.get("status") in ("completed", "failed") else None
+    return get_job(job_id)
+
+
+def worker_heartbeat(status: dict[str, Any] | None = None) -> None:
+    """Signale que le worker est vivant, avec l'état de sa session.
+
+    Sans ce battement, l'API ne peut pas distinguer « personne ne dépile » d'un job simplement
+    lent — et laisserait l'appelant attendre un résultat qui ne viendrait jamais.
+    """
+    r = _redis()
+    if r is None:
+        return
+    payload = {"at": _now_iso(), **(status or {})}
+    r.set(WORKER_HEARTBEAT_KEY, json.dumps(payload), ex=WORKER_HEARTBEAT_TTL_SECONDS)
+
+
+def read_worker_status() -> dict[str, Any] | None:
+    """État publié par le worker, ou None si son battement a expiré (worker absent ou bloqué)."""
+    r = _redis()
+    if r is None:
+        return None
+    raw = r.get(WORKER_HEARTBEAT_KEY)
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def queue_depths() -> dict[str, int]:
+    """Profondeur des deux files, pour la supervision."""
+    r = _redis()
+    if r is None:
+        return {}
+    try:
+        return {"read": int(r.llen(QUEUE_READ)), "push": int(r.llen(QUEUE_PUSH))}
+    except Exception:
+        return {}
 
 
 def brpop_next_job(timeout_seconds: int = 5) -> tuple[str, str] | None:
     r = _redis()
     if r is None:
         return None
+    # Ordre significatif : les lectures passent avant les mutations.
     item = r.brpop([QUEUE_READ, QUEUE_PUSH], timeout=timeout_seconds)
     if not item:
         return None

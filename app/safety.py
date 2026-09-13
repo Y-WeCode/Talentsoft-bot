@@ -213,3 +213,20 @@ def actions_succeeded(actions: dict) -> bool:
         elif not (isinstance(result, dict) and result.get("ok") is True):
             return False
     return True
+
+
+def actions_may_have_mutated(actions: dict) -> bool:
+    """True si une écriture a pu aboutir sans avoir pu être vérifiée.
+
+    Le bot vérifie chaque écriture après coup. Quand la vérification échoue, il ne peut pas
+    conclure : l'événement a peut-être été créé. L'appelant doit alors vérifier avant de
+    rejouer, au lieu de créer un doublon dans le dossier du candidat.
+    """
+    if not actions:
+        return False
+    for result in actions.values():
+        items = result if isinstance(result, list) else [result]
+        for item in items:
+            if isinstance(item, dict) and item.get("mutation_may_have_happened"):
+                return True
+    return False

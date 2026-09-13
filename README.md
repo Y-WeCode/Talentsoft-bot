@@ -41,12 +41,16 @@ docker compose up -d --build api
 curl http://127.0.0.1:42201/
 ```
 
-Mode async (recommandé pour les pushs avec documents derrière un reverse proxy) :
+Déploiement recommandé, avec worker (voir « Un seul navigateur » plus bas) :
 
 ```bash
-# .env : REDIS_URL=redis://redis:6379/0 et TS_ASYNC_JOBS_ENABLED=true
+# .env : REDIS_URL=redis://talentsoft_bot_redis:6379/0 et TS_ASYNC_JOBS_ENABLED=true
 make deploy
 ```
+
+Le worker devient alors le **seul** processus à piloter un navigateur, et l'api un guichet qui empile
+puis attend. `TS_ASYNC_JOBS_ENABLED=true` doit être posé pour **les deux** services : sans cela l'api
+ouvre son propre Chromium en plus de celui du worker (elle journalise `config_suspecte` au démarrage).
 
 ## Contrat HTTP
 
@@ -169,11 +173,28 @@ Un second appel avec la même `idempotency_key` (ou le même contenu) dans les 2
 l'en-tête `X-Idempotent-Replay: true`, sans toucher au Back Office. La clé est libérée si la mutation n'a pas démarré
 (404, 503, erreur de bootstrap) pour permettre un rejeu légitime.
 
-### Mode async
+### Appels synchrones, jobs, et le 202
 
-`?async=1` renvoie `202 {"job_id", "status"}`. Interroger `GET /jobs/{job_id}` : `status` passe de `queued` à
-`running` puis `completed` (`result` = même contrat que le mode sync) ou `failed` (`error`). Un job déjà marqué
-`mutation_started` n'est jamais rejoué par le worker.
+Avec un worker, **tout passe par la file**, y compris les lectures et `/selftest`. Un appel synchrone n'est donc
+plus qu'une attente de courtoisie :
+
+| Situation | Réponse |
+| --- | --- |
+| Job terminé dans `SYNC_WAIT_TIMEOUT_SECONDS` | `200`, contrat inchangé |
+| Rejeu d'idempotence | `200` + `X-Idempotent-Replay: true` |
+| **Attente dépassée** | `202 {job_id, status, poll}` + `Location: /jobs/{id}` |
+| Worker absent, ou session `degraded` | `503` + `Retry-After` |
+| Job échoué | `404` / `409` / `500` selon `error_code` |
+
+Un `202` se poursuit par `GET /jobs/{job_id}`, **jamais** par un rejeu sous une nouvelle clé d'idempotence : à cet
+instant la mutation est peut-être en cours. C'est pour la même raison qu'une attente dépassée ne rend pas un `5xx`,
+qui inviterait à rejouer.
+
+`?async=1` sur `/update-application` renvoie directement `202 {"job_id", "status"}` sans attendre.
+
+`GET /jobs/{job_id}` : `status` passe de `queued` à `running` puis `completed` (`result` = contrat du mode sync) ou
+`failed`, avec `error_code` (code stable, analysable) et `error_detail` (diagnostic pour un humain). Un job déjà
+marqué `mutation_started` n'est jamais rejoué par le worker.
 
 ## Configuration
 
@@ -191,6 +212,22 @@ Voir `.env.example`. Points clés :
 - `LOGIN_MAX_FAILURES` / `LOGIN_FAILURE_WINDOW_SECONDS` : au-delà, état `degraded`, plus aucune tentative de login
   (protège le compte technique d'un verrouillage Talentsoft). Sortie : `make reset-session`.
 - `API_TOKEN_PREVIOUS` : rotation du token sans coupure.
+- `SYNC_WAIT_TIMEOUT_SECONDS` / `SYNC_READ_WAIT_TIMEOUT_SECONDS` : budget d'attente d'un appel synchrone avant
+  bascule en `202`. À garder **sous** le `proxy_read_timeout` du reverse proxy.
+
+### Un seul navigateur, et pourquoi
+
+**Le tenant n'admet qu'une session active par compte technique.** Une seconde connexion déconnecte la première, et
+la reconnexion en cascade finit par faire basculer le bot en état `degraded`. Le déploiement doit donc respecter :
+
+> un déploiement = **un** propriétaire de navigateur.
+
+Le piège n'est pas seulement interne au dépôt : **deux déploiements quelconques** visant le même `TS_USERNAME`
+reproduisent le symptôme — deux conteneurs, deux hôtes, ou un poste de développement resté allumé. C'est la
+première chose à vérifier devant des déconnexions inexpliquées. `GET /` expose `browser_owner` et un bloc `worker`
+(`alive`, `session_open`, `login_count`, `degraded`) pour le constater.
+
+`login_count` **stable** sur une série de pushs est la preuve que la session est bien réutilisée.
 
 ### Compte technique Talentsoft
 
@@ -235,8 +272,12 @@ et les garde-fous, pas seulement la mécanique Playwright.
 
 ## Exploitation
 
-- Reverse proxy : `proxy_read_timeout` supérieur à la durée d'un push avec documents (plusieurs minutes), ou mode async.
-- Un seul replica par tenant (`--workers 1`, mutex process-local).
+- Reverse proxy : `proxy_read_timeout` supérieur à `SYNC_WAIT_TIMEOUT_SECONDS`, sinon le client reçoit une coupure
+  au lieu du `202` qui lui dit où suivre son job.
+- Un seul replica par tenant, et `api` + `worker` sur **le même hôte** : ils partagent le volume `./uploads`, par
+  lequel l'api transmet les fichiers au worker.
+- Worker arrêté alors que `TS_ASYNC_JOBS_ENABLED=true` : toutes les routes navigateur répondent `503`. C'est
+  volontaire — mieux vaut un refus explicite qu'un second navigateur dans l'api.
 - `make verify-code` après un déploiement async : api et worker doivent porter la même version.
 - Supervision : `POST /selftest` planifié (cron ou Uptime Kuma) pour détecter un changement d'interface Cegid.
 
