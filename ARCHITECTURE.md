@@ -7,9 +7,15 @@ aucun événement typé avec commentaire, aucune pièce jointe sur une candidatu
 ## Vue d'ensemble
 
 ```
-Hippolyte.ai (API NestJS)  --HTTP Bearer-->  Talentsoft-bot (FastAPI)  --Playwright/Chromium-->  Back Office Talentsoft
-                                                   |  1 thread navigateur, 1 session partagée
-                                                   |  Redis (optionnel) : jobs async + idempotence
+Hippolyte.ai  --HTTP Bearer-->  api (FastAPI, AUCUN navigateur)
+                                   |  empile un job, attend le résultat
+                                   v
+                                 Redis  ts:jobs:read  (lectures, prioritaire)
+                                        ts:jobs:push  (mutations)
+                                   |
+                                   v
+                                 worker  --Playwright/Chromium-->  Back Office Talentsoft
+                                         UN navigateur, UNE session, réutilisée entre les jobs
 ```
 
 Une instance de bot = un tenant Talentsoft (compte technique dédié), comme pour le DR bot.
@@ -18,16 +24,18 @@ Une instance de bot = un tenant Talentsoft (compte technique dédié), comme pou
 
 | Fichier | Rôle |
 | --- | --- |
-| `app/main.py` | FastAPI : authentification Bearer (temps constant, rotation), uploads sûrs, executor mono-thread + admission, `run_with_session`, idempotence sync, routes |
+| `app/main.py` | FastAPI : authentification Bearer (temps constant, rotation), uploads sûrs, admission, idempotence, traduction des codes métier en statuts HTTP, routes |
+| `app/browser_runner.py` | Exécution d'un travail navigateur **sans dépendance à FastAPI** : mutex, bootstrap de session, traduction des exceptions en codes métier stables |
 | `app/config.py` | Lecture centralisée des variables d'environnement |
 | `app/safety.py` | Allowlist d'URL (`TS_BASE_URL` + hôtes d'authentification), validation email/offre, appariement de référence d'offre, chemins d'upload, octets magiques, contrat `actions_succeeded` |
-| `app/browser_lock.py` | Mutex navigateur + file d'admission bornée (503 + `Retry-After`) |
+| `app/browser_lock.py` | Mutex navigateur chez le propriétaire ; file d'admission bornée côté api (503 + `Retry-After`) |
 | `app/idempotency.py` | Réservation et mémorisation des résultats par clé (Redis ou mémoire) |
 | `app/session_manager.py` | Un `TalentsoftBot` partagé : recyclage idle / max age / navigateur mort, état dégradé après échecs de login |
 | `app/scraper.py` | `TalentsoftBot` : launch Playwright, `storage_state`, login, ouverture de fiche, événement, pièces jointes, référentiels, auto-test, traces |
 | `app/ts_pages.py` | Page objects (`LoginPage` avec choix de compte, `GlobalSearch`, `ApplicationPage`, `EventDialog`, `AttachmentsDialog`, `CookieBanner`), `first_locator`, `Deadline`, conversion de date |
 | `app/ts_selectors.py` | Tous les sélecteurs et gabarits d'URL du Back Office : le seul fichier à retoucher quand Cegid change l'interface |
-| `app/jobs.py`, `app/worker.py` | File Redis et worker : `mutation_started` persisté avant exécution, jamais de rejeu |
+| `app/jobs.py` | Les deux files, l'état des jobs, l'attente de résultat (`BLPOP`), le battement de cœur du worker |
+| `app/worker.py` | Seul propriétaire du navigateur : routage par type de job, `mutation_started` persisté à la première écriture, jamais de rejeu |
 | `tools/discover.py` | Phase 0 : capture HAR, trace, DOM et résumé des sélecteurs sur le tenant |
 
 ## Flux `POST /update-application`
@@ -37,8 +45,9 @@ Une instance de bot = un tenant Talentsoft (compte technique dédié), comme pou
 2. Clé d'idempotence : fournie par l'appelant ou dérivée de
    `(sha256(email), offer_id, event_type, sha256(comment), sha256(fichiers))`. L'email n'entre dans la clé que
    sous forme d'empreinte. Résultat déjà mémorisé : réponse immédiate avec `X-Idempotent-Replay: true`.
-   Même requête en cours : 409.
-3. Admission dans la file (503 + `Retry-After` si pleine) puis exécution dans l'unique thread navigateur.
+   Même requête déjà en cours : **202** avec son `job_id` si un job la porte, `409` sinon.
+3. Admission (503 + `Retry-After` si pleine), puis empilage sur `ts:jobs:push` et attente du résultat dans
+   la limite de `SYNC_WAIT_TIMEOUT_SECONDS`. Budget dépassé : **202** avec le `job_id` à suivre.
 4. `session_manager.get_bot()` : réutilise la session ou relance Chromium + login fédéré (bandeau de consentement
    refusé, écran de choix de compte franchi, formulaire de l'IdP). Un retry de bootstrap, aucun après.
 5. `TalentsoftBot.update_application` :
@@ -80,7 +89,49 @@ Une instance de bot = un tenant Talentsoft (compte technique dédié), comme pou
   candidat** : seules des empreintes. L'email est une donnée personnelle et sert d'identifiant de recherche.
 - Conteneur non root (`pwuser`), système de fichiers en lecture seule, `cap_drop ALL`, `no-new-privileges`.
 
-## Concurrence
+## Concurrence : un déploiement = un propriétaire de navigateur
 
-Un seul Chromium, jobs sérialisés (Uvicorn `--workers 1`). Suffisant pour le rythme des synthèses ; pour du volume,
-plusieurs instances (une par tenant) ou un mode rejeu HTTP (phase 2 si les XHR internes le permettent).
+**Le tenant n'admet qu'une session active par compte technique.** Une seconde connexion invalide la première ;
+le processus lésé se reconnecte, ce qui invalide l'autre, jusqu'à épuiser `LOGIN_MAX_FAILURES` et basculer en
+`degraded`. Ce n'est pas une optimisation : c'est une contrainte du fournisseur.
+
+D'où l'invariant, tenu par `config.browser_owner()` :
+
+| `TS_ASYNC_JOBS_ENABLED` | Propriétaire du navigateur | Rôle de l'api |
+| --- | --- | --- |
+| `true` (production) | le `worker`, seul | guichet : empile, attend, ne construit **jamais** de `TalentsoftBot` |
+| `false` (dev, tests, petite installation) | l'`api`, mono-processus | exécute dans son executor mono-thread |
+
+Le test paramétré `test_api_never_opens_a_browser_in_worker_mode` remplace `TalentsoftBot` par un constructeur
+qui échoue, sur **toutes** les routes navigateur : une régression devient un test rouge, pas une déconnexion en
+recette.
+
+Piège opérationnel correspondant : **deux déploiements quelconques** visant le même `TS_USERNAME` reproduisent le
+symptôme — deux conteneurs, deux hôtes, ou un poste de développement resté allumé. L'api journalise
+`config_suspecte` au démarrage quand `REDIS_URL` est défini sans `TS_ASYNC_JOBS_ENABLED`, configuration typique
+d'un worker qui tourne pendant que l'api s'ouvre son propre navigateur.
+
+### Pourquoi pas un verrou distribué Redis
+
+C'est la correction qui vient naturellement à l'esprit, et elle ne marche pas : **la session n'est pas dans Redis,
+elle est dans un processus**. Avec un verrou partagé entre `api` et `worker` :
+
+1. l'api prend le verrou, réutilise sa session, exécute, relâche ;
+2. le worker prend le verrou ; sa propre session n'existe pas ou a été invalidée → il se connecte, ce qui
+   invalide celle de l'api ;
+3. l'api reprend le verrou, constate qu'elle n'est plus authentifiée, se reconnecte, invalide celle du worker.
+
+Chaque changement de propriétaire coûte un login. Le verrou transforme une course aléatoire en ping-pong
+déterministe, et produit précisément la tempête de logins qui déclenche l'état `degraded`. Partager
+`storage_state.json` n'y change rien : une session invalidée côté serveur le reste, quel que soit le cookie relu.
+
+Le seul emploi légitime d'un verrou Redis ici serait un verrou d'**unicité de propriétaire** au démarrage
+(`SET ts:browser:owner NX EX`), pour qu'un second propriétaire échoue bruyamment. Il n'est pas implémenté.
+
+### Débit
+
+Une seule session, donc un job à la fois. Un push durant de l'ordre de la minute, le plafond est de 40 à 60 pushs
+par heure. `ts:jobs:read` est servie **avant** `ts:jobs:push` (l'ordre des clés passé à `BRPOP` fait la priorité),
+si bien qu'une consultation d'historique ou un `/selftest` ne patiente jamais derrière vingt pushs — mais elle
+peut patienter derrière **un**, ce qui est le principal effet de bord de cette architecture. Au-delà de ce volume,
+la réponse n'est pas la concurrence sur ce tenant mais une seconde instance avec **son propre compte technique**.

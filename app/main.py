@@ -18,10 +18,10 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFi
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from . import browser_lock, config, idempotency, models, safety
-from .scraper import ApplicationNotFound, BrowserFatalError, SessionExpired, sweep_old_traces
-from .session_manager import SessionBootstrapError, SessionDegradedError, session_manager
-from .ts_pages import AmbiguousCandidate, ApplicationNotOnOffer, CandidateNotFound, JobTimeout
+from . import browser_lock, browser_runner, config, idempotency, jobs, models, safety
+from .browser_runner import BrowserJobError
+from .scraper import sweep_old_traces
+from .session_manager import session_manager
 
 # --- Configuration et initialisation -----------------------------------------------------
 
@@ -38,7 +38,7 @@ if not config.ts_username() or not config.ts_password():
     raise ValueError("Les variables d'environnement TS_USERNAME et TS_PASSWORD doivent être définies.")
 
 ENABLE_API_DOCS = config.enable_api_docs()
-API_VERSION = "0.2.0"
+API_VERSION = "0.3.0"
 
 security = HTTPBearer()
 T = TypeVar("T")
@@ -54,6 +54,15 @@ logging.basicConfig(
     ],
 )
 logger = logging.getLogger(__name__)
+
+if config.redis_url() and not config.async_jobs_enabled():
+    # Configuration typique d un deploiement ou le worker tourne mais ou l api l ignore :
+    # les deux ouvrent alors un navigateur sur le meme compte technique, et leurs sessions
+    # se deconnectent mutuellement jusqu a l etat degrade.
+    logger.warning(
+        "config_suspecte REDIS_URL est defini mais TS_ASYNC_JOBS_ENABLED est faux : "
+        "si un worker tourne, deux navigateurs se disputeront la meme session Talentsoft"
+    )
 
 
 def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
@@ -165,84 +174,77 @@ def raise_generic_server_error(route_name: str, error: Exception):
     raise HTTPException(status_code=500, detail="Erreur interne du serveur")
 
 
-# --- Exécution sous mutex navigateur ---------------------------------------------------------
+# --- Exécution d'un travail navigateur --------------------------------------------------------
+
+# L'API n'ouvre un navigateur QUE lorsqu'elle en est propriétaire (mode mono-processus). Dès que
+# la file est active, c'est le worker, et lui seul : voir config.browser_owner() pour le pourquoi.
+
+_HTTP_STATUS_BY_CODE = {
+    browser_runner.CODE_BROWSER_BUSY: 503,
+    browser_runner.CODE_SESSION_DEGRADED: 503,
+    browser_runner.CODE_CANDIDATE_NOT_FOUND: 404,
+    browser_runner.CODE_APPLICATION_NOT_ON_OFFER: 404,
+    browser_runner.CODE_AMBIGUOUS_CANDIDATE: 409,
+}
+
+# Les détails exposés sont écrits ici, jamais repris du message d'exception : celui-ci peut porter
+# une URL, du HTML ou une valeur saisie. Le diagnostic reste dans les logs et dans `error_detail`.
+_HTTP_DETAIL_BY_CODE = {
+    browser_runner.CODE_BROWSER_BUSY: "Browser busy",
+    browser_runner.CODE_SESSION_DEGRADED: "Session Talentsoft dégradée : intervention requise",
+    browser_runner.CODE_CANDIDATE_NOT_FOUND: "Candidat introuvable",
+    browser_runner.CODE_APPLICATION_NOT_ON_OFFER: "Ce candidat n'a pas de candidature sur cette offre",
+    browser_runner.CODE_AMBIGUOUS_CANDIDATE: (
+        "Plusieurs candidats correspondent à cet email : levée d'ambiguïté requise"
+    ),
+}
 
 
-def _get_bot_with_bootstrap_retry():
-    """Un seul retry si le bootstrap échoue (aucune mutation encore)."""
-    try:
-        return session_manager.get_bot()
-    except SessionBootstrapError as error:
-        if session_manager.is_degraded():
-            raise
-        logger.warning(f"Bootstrap session échoué ({error}), invalidate + un seul retry")
-        session_manager.invalidate("bootstrap_failed")
-        return session_manager.get_bot()
+def http_error_for(code: str) -> HTTPException:
+    """Traduit un code métier en statut HTTP. Tout code inconnu vaut 500, volontairement."""
+    status = _HTTP_STATUS_BY_CODE.get(code, 500)
+    detail = _HTTP_DETAIL_BY_CODE.get(code, "Erreur interne du serveur")
+    headers = None
+    if status == 503:
+        retry = "600" if code == browser_runner.CODE_SESSION_DEGRADED else str(browser_lock.get_retry_after_seconds())
+        headers = {"Retry-After": retry}
+    return HTTPException(status_code=status, detail=detail, headers=headers)
 
 
-def run_with_session(work: Callable[[object], T], lock_timeout_seconds: float = 2.0) -> T:
-    """Exécute work(bot) sous le mutex navigateur.
+def accepted(job_id: str, status: str = "running") -> JSONResponse:
+    """202 : le job continue côté worker, l'appelant le suit sur /jobs/{id}.
 
-    - bootstrap : un retry ;
-    - navigateur perdu en cours de job : invalidation, aucun rejeu ;
-    - session dégradée : 503 sans nouvelle tentative de login.
+    Corps et en-têtes identiques quel que soit le chemin — `?async=1`, attente dépassée, ou rejeu
+    d'une clé dont le job tourne encore. La distinction n'apprend rien à l'appelant : dans les
+    trois cas il doit interroger `/jobs/{id}`.
+
+    Surtout pas un 5xx ici : à cet instant la mutation est peut-être en cours, et un 5xx
+    inviterait l'appelant à rejouer — exactement ce qu'il ne faut jamais faire après une écriture
+    engagée.
     """
-    with browser_lock.browser_slot(timeout_seconds=lock_timeout_seconds):
-        try:
-            bot = _get_bot_with_bootstrap_retry()
-        except SessionDegradedError as error:
-            raise HTTPException(
-                status_code=503,
-                detail="Session Talentsoft dégradée : intervention requise",
-                headers={"Retry-After": "600"},
-            ) from error
-        except SessionBootstrapError as error:
-            session_manager.invalidate("bootstrap_retry_failed")
-            if session_manager.is_degraded():
-                raise HTTPException(
-                    status_code=503,
-                    detail="Session Talentsoft dégradée : intervention requise",
-                    headers={"Retry-After": "600"},
-                ) from error
-            raise HTTPException(status_code=500, detail="Erreur interne du serveur") from error
+    return JSONResponse(
+        content={"job_id": job_id, "status": status, "poll": f"/jobs/{job_id}"},
+        status_code=202,
+        headers={"Location": f"/jobs/{job_id}", "Retry-After": str(browser_lock.get_retry_after_seconds())},
+    )
 
-        try:
-            return work(bot)
-        except BrowserFatalError as error:
-            session_manager.invalidate("browser_fatal_mid_job")
-            logger.exception(f"BrowserFatalError mid-job: {type(error).__name__}")
-            raise HTTPException(status_code=500, detail="Erreur interne du serveur") from error
-        except JobTimeout as error:
-            session_manager.invalidate("job_timeout")
-            logger.error("job_timeout")
-            raise HTTPException(status_code=500, detail="Erreur interne du serveur") from error
-        except SessionExpired as error:
-            session_manager.invalidate("session_expired")
-            raise HTTPException(status_code=500, detail="Erreur interne du serveur") from error
-        except (ApplicationNotFound, CandidateNotFound) as error:
-            raise HTTPException(status_code=404, detail="Candidat introuvable") from error
-        except ApplicationNotOnOffer as error:
-            raise HTTPException(status_code=404, detail="Ce candidat n'a pas de candidature sur cette offre") from error
-        except AmbiguousCandidate as error:
-            # Plusieurs candidats pour cet email : on refuse de choisir. Écrire sur le dossier
-            # d'un autre candidat serait une divulgation de données personnelles.
-            raise HTTPException(
-                status_code=409,
-                detail="Plusieurs candidats correspondent à cet email : levée d'ambiguïté requise",
-            ) from error
+
+# --- Mode mono-processus : l'API possède le navigateur ---------------------------------------
 
 
 def _run_browser_job(job_type: str, work: Callable[[object], T]) -> T:
     started = time.monotonic()
     try:
-        result = run_with_session(work, lock_timeout_seconds=config.browser_admitted_lock_timeout_seconds())
+        result = browser_runner.run_with_session(
+            work, lock_timeout_seconds=config.browser_admitted_lock_timeout_seconds()
+        )
         duration_ms = int((time.monotonic() - started) * 1000)
         logger.info(f"job_type={job_type} duration_ms={duration_ms} admission_rejected=false")
         return result
-    except HTTPException as error:
+    except BrowserJobError as error:
         duration_ms = int((time.monotonic() - started) * 1000)
-        logger.warning(f"job_type={job_type} duration_ms={duration_ms} status={error.status_code}")
-        raise
+        logger.warning(f"job_type={job_type} duration_ms={duration_ms} code={error.code}")
+        raise http_error_for(error.code) from error
 
 
 async def run_browser_async(job_type: str, work: Callable[[object], T]) -> T:
@@ -260,6 +262,65 @@ async def run_browser_async(job_type: str, work: Callable[[object], T]) -> T:
         raise HTTPException(status_code=500, detail="Erreur interne du serveur") from error
     finally:
         browser_lock.release_admit()
+
+
+# --- Mode worker : l'API empile et attend ----------------------------------------------------
+
+
+def require_worker_available() -> None:
+    """Refuse tout de suite si personne ne dépilera, plutôt que de faire attendre pour rien.
+
+    Un 503 est rejouable par l'appelant ; un job empilé sans worker ne l'est pas, et ses documents
+    dormiraient indéfiniment dans uploads/.
+    """
+    snapshot = jobs.read_worker_status()
+    if not snapshot:
+        logger.warning("worker_unavailable heartbeat=absent")
+        raise HTTPException(
+            status_code=503,
+            detail="Worker navigateur indisponible : réessayer",
+            headers={"Retry-After": str(browser_lock.get_retry_after_seconds())},
+        )
+    if snapshot.get("degraded"):
+        raise http_error_for(browser_runner.CODE_SESSION_DEGRADED)
+
+
+async def wait_for_job(job_id: str, timeout_seconds: int) -> dict | None:
+    """Attend la fin du job hors de la boucle asyncio : l'attente Redis est bloquante.
+
+    Le nombre d'attentes simultanées est borné par le contrôle d'admission, ce qui empêche ces
+    threads d'épuiser l'executor par défaut.
+    """
+    return await asyncio.to_thread(jobs.wait_for_result, job_id, timeout_seconds)
+
+
+def job_result_or_error(job: dict):
+    """Résultat d'un job terminé, ou l'erreur HTTP correspondant à son code."""
+    if job.get("status") == "completed":
+        return job.get("result")
+    raise http_error_for(job.get("error_code") or "internal_error")
+
+
+async def run_read_job(job_type: str, payload: dict, work: Callable[[object], T]):
+    """Exécute une lecture. Retourne (résultat, job_id) : exactement l'un des deux est None.
+
+    Les lectures ne portent jamais de clé d'idempotence et ne marquent jamais de mutation : elles
+    sont rejouables sans risque, et passent devant les pushs grâce à la file `ts:jobs:read`.
+    """
+    if config.browser_owner() == "api":
+        return await run_browser_async(job_type, work), None
+    require_worker_available()
+    if not browser_lock.try_admit():
+        logger.warning(f"job_type={job_type} admission_rejected=true inflight={browser_lock.inflight_count()}")
+        raise browser_lock.busy_exception()
+    try:
+        job = jobs.enqueue_job(job_type, payload)
+        done = await wait_for_job(job["id"], config.sync_read_wait_timeout_seconds())
+    finally:
+        browser_lock.release_admit()
+    if done is None:
+        return None, job["id"]
+    return job_result_or_error(done), None
 
 
 # --- Idempotence ----------------------------------------------------------------------------
@@ -285,22 +346,46 @@ def build_idempotency_key(
     return f"f:{safety.short_hash('|'.join(parts))}"
 
 
+def _replay_response(job_type: str, replay: dict) -> JSONResponse:
+    logger.info(f"job_type={job_type} idempotent_replay=true")
+    return JSONResponse(content=replay, status_code=200, headers={"X-Idempotent-Replay": "true"})
+
+
+def _already_in_progress() -> HTTPException:
+    return HTTPException(
+        status_code=409,
+        detail="Une requête identique est déjà en cours",
+        headers={"Retry-After": str(browser_lock.get_retry_after_seconds())},
+    )
+
+
 async def run_idempotent_update(
     *,
     job_type: str,
     key: str,
+    payload: dict,
     work: Callable[[object], dict],
+    on_enqueued: Callable[[], None] | None = None,
 ) -> JSONResponse:
+    """Exécute une mutation, chez le propriétaire du navigateur.
+
+    `payload` décrit le travail pour le worker ; `work` fait le même travail en direct quand
+    l'API est propriétaire. Les deux doivent rester équivalents.
+
+    `on_enqueued` est appelé une fois le job empilé : c'est là que l'appelant cède la propriété
+    des fichiers téléversés au worker, et cesse donc de les supprimer en sortie de requête.
+    """
+    if config.browser_owner() == "worker":
+        return await _run_mutation_via_worker(job_type=job_type, key=key, payload=payload, on_enqueued=on_enqueued)
+    return await _run_mutation_in_api(job_type=job_type, key=key, work=work)
+
+
+async def _run_mutation_in_api(*, job_type: str, key: str, work: Callable[[object], dict]) -> JSONResponse:
     state, replay = idempotency.reserve(key)
     if state == "replay" and replay is not None:
-        logger.info(f"job_type={job_type} idempotent_replay=true")
-        return JSONResponse(content=replay, status_code=200, headers={"X-Idempotent-Replay": "true"})
+        return _replay_response(job_type, replay)
     if state == "in_progress":
-        raise HTTPException(
-            status_code=409,
-            detail="Une requête identique est déjà en cours",
-            headers={"Retry-After": str(browser_lock.get_retry_after_seconds())},
-        )
+        raise _already_in_progress()
     try:
         payload = await run_browser_async(job_type, work)
     except HTTPException as error:
@@ -312,6 +397,72 @@ async def run_idempotent_update(
         raise
     idempotency.store_result(key, payload)
     return JSONResponse(content=payload, status_code=200)
+
+
+async def _run_mutation_via_worker(
+    *,
+    job_type: str,
+    key: str,
+    payload: dict,
+    on_enqueued: Callable[[], None] | None,
+) -> JSONResponse:
+    """Empile la mutation et attend son résultat, dans la limite du budget d'attente.
+
+    C'est le worker qui appelle `store_result` ou `release` : lui seul sait si une écriture a
+    été engagée. Libérer la clé ici sur un échec effacerait cette distinction, et autoriserait
+    un rejeu par-dessus une mutation déjà partie.
+    """
+    require_worker_available()
+    if not browser_lock.try_admit():
+        logger.warning(f"job_type={job_type} admission_rejected=true inflight={browser_lock.inflight_count()}")
+        raise browser_lock.busy_exception()
+    try:
+        state, replay = idempotency.reserve(key)
+        if state == "replay" and replay is not None:
+            return _replay_response(job_type, replay)
+        if state == "in_progress":
+            existing = jobs.job_id_for_idempotency_key(key)
+            if existing:
+                # Cas courant : l'attente d'un appel précédent a expiré et l'appelant rejoue.
+                # Lui rendre son job est exploitable ; un 409 ne l'est pas.
+                return accepted(existing)
+            raise _already_in_progress()
+        try:
+            job = jobs.enqueue_job(jobs.JOB_TYPE_UPDATE_APPLICATION, payload, key)
+        except Exception:
+            # Rien n'a été empilé : la clé ne doit pas rester bloquée jusqu'à son TTL.
+            idempotency.release(key)
+            raise
+        if on_enqueued:
+            on_enqueued()
+        done = await wait_for_job(job["id"], config.sync_wait_timeout_seconds())
+    finally:
+        browser_lock.release_admit()
+    if done is None:
+        return accepted(job["id"])
+    return JSONResponse(content=job_result_or_error(done), status_code=200)
+
+
+def _mutation_payload(
+    *,
+    candidate_email: str,
+    offer_id: str,
+    event_type: str | None = None,
+    comment: str | None = None,
+    event_date: str | None = None,
+    document_paths: list[str] | None = None,
+    document_category: str | None = None,
+) -> dict:
+    """Description d'une mutation, telle que le worker la relira."""
+    return {
+        "candidate_email": candidate_email,
+        "offer_id": offer_id,
+        "event_type": event_type,
+        "comment": comment,
+        "event_date": event_date,
+        "document_paths": document_paths or [],
+        "document_category": document_category,
+    }
 
 
 def _update_payload(update_info: dict | None) -> dict:
@@ -357,17 +508,50 @@ app = FastAPI(
 )
 
 
+def _worker_view() -> tuple[dict, dict]:
+    """État du worker et profondeur des files, sans jamais lever.
+
+    Un healthcheck qui tombe avec Redis ne sert à rien : il faut au contraire qu'il dise que
+    Redis est injoignable.
+    """
+    try:
+        snapshot = jobs.read_worker_status()
+        depths = jobs.queue_depths()
+    except Exception as error:
+        logger.warning(f"worker_view_failed error={type(error).__name__}")
+        return {"alive": False, "reason": "redis_unreachable"}, {}
+    if not snapshot:
+        return {"alive": False, "reason": "heartbeat_expired"}, depths
+    return snapshot, depths
+
+
 @app.get("/", summary="Statut de l'API")
 def read_root():
     """Healthcheck sans prise du mutex navigateur."""
-    status = session_manager.status()
-    return {
+    owner = config.browser_owner()
+    base = {
         "status": "ok",
         "service": "talentsoft-bot",
         "version": API_VERSION,
+        "browser_owner": owner,
         "browser_busy": browser_lock.is_busy(),
         "browser_inflight": browser_lock.inflight_count(),
-        **status,
+    }
+    if owner == "api":
+        return {**base, "worker": {"alive": False, "reason": "browser_owner=api"}, **session_manager.status()}
+
+    worker, depths = _worker_view()
+    # Les champs de session sont recopiés à la racine : les sondes existantes les y cherchent,
+    # et elles décrivent toujours la seule session qui existe — celle du worker.
+    return {
+        **base,
+        "worker": worker,
+        "queues": depths,
+        "session_open": bool(worker.get("session_open")),
+        "session_authenticated": bool(worker.get("session_authenticated")),
+        "login_count": worker.get("login_count", 0),
+        "degraded": bool(worker.get("degraded")),
+        "degraded_reason": worker.get("degraded_reason"),
     }
 
 
@@ -400,11 +584,19 @@ async def update_application(
         key = build_idempotency_key(idempotency_key, email, offer, event_type, clean_comment, document_paths)
 
         if async_mode == 1:
-            from . import jobs as jobs_mod
-
-            if not jobs_mod.is_async_jobs_enabled():
+            if not jobs.is_async_jobs_enabled():
                 raise HTTPException(status_code=400, detail="Jobs asynchrones non activés (TS_ASYNC_JOBS_ENABLED)")
-            job = jobs_mod.enqueue_update_application(
+            # La clé est réservée ici aussi : sans cette réservation, un appel synchrone et un
+            # job asynchrone portant la même clé pouvaient muter la même candidature en parallèle.
+            state, replay = idempotency.reserve(key)
+            if state == "replay" and replay is not None:
+                return _replay_response("update-application", replay)
+            if state == "in_progress":
+                existing = jobs.job_id_for_idempotency_key(key)
+                if existing:
+                    return accepted(existing)
+                raise _already_in_progress()
+            job = jobs.enqueue_update_application(
                 candidate_email=email,
                 offer_id=offer,
                 event_type=event_type,
@@ -415,7 +607,7 @@ async def update_application(
                 idempotency_key=key,
             )
             document_paths = []  # propriété transférée au worker
-            return JSONResponse(content={"job_id": job["id"], "status": job["status"]}, status_code=202)
+            return accepted(job["id"], status=job["status"])
 
         paths_for_job = list(document_paths)
 
@@ -432,7 +624,22 @@ async def update_application(
                 )
             )
 
-        return await run_idempotent_update(job_type="update-application", key=key, work=work)
+        return await run_idempotent_update(
+            job_type="update-application",
+            key=key,
+            payload=_mutation_payload(
+                candidate_email=email,
+                offer_id=offer,
+                event_type=event_type,
+                comment=clean_comment,
+                event_date=event_date,
+                document_paths=paths_for_job,
+                document_category=document_category,
+            ),
+            work=work,
+            # Propriété des fichiers transférée au worker : ne plus les supprimer en sortie.
+            on_enqueued=document_paths.clear,
+        )
     except Exception as error:
         raise_generic_server_error("/update-application", error)
     finally:
@@ -463,7 +670,18 @@ async def create_event(request: models.EventRequest, token: str = Depends(verify
                 )
             )
 
-        return await run_idempotent_update(job_type="create-event", key=key, work=work)
+        return await run_idempotent_update(
+            job_type="create-event",
+            key=key,
+            payload=_mutation_payload(
+                candidate_email=email,
+                offer_id=offer,
+                event_type=request.event_type,
+                comment=clean_comment,
+                event_date=request.event_date,
+            ),
+            work=work,
+        )
     except Exception as error:
         raise_generic_server_error("/applications/events", error)
 
@@ -498,7 +716,18 @@ async def add_documents(
                 )
             )
 
-        return await run_idempotent_update(job_type="add-documents", key=key, work=work)
+        return await run_idempotent_update(
+            job_type="add-documents",
+            key=key,
+            payload=_mutation_payload(
+                candidate_email=email,
+                offer_id=offer,
+                document_paths=paths_for_job,
+                document_category=document_category,
+            ),
+            work=work,
+            on_enqueued=document_paths.clear,
+        )
     except Exception as error:
         raise_generic_server_error("/applications/documents", error)
     finally:
@@ -518,8 +747,12 @@ async def list_events(
         def work(bot):
             return {"offer_id": offer, "events": bot.list_events(email, offer)}
 
-        payload = await run_browser_async("list-events", work)
-        return JSONResponse(content=payload, status_code=200)
+        result, pending_job_id = await run_read_job(
+            jobs.JOB_TYPE_LIST_EVENTS, {"candidate_email": email, "offer_id": offer}, work
+        )
+        if pending_job_id:
+            return accepted(pending_job_id)
+        return JSONResponse(content=result, status_code=200)
     except Exception as error:
         raise_generic_server_error("/applications/events", error)
 
@@ -528,7 +761,7 @@ _REFERENTIAL_CACHE: dict[str, tuple[float, list]] = {}
 _REFERENTIAL_TTL_SECONDS = 3600
 
 
-async def _referential(name: str, reader, candidate_email: str | None, offer_id: str | None):
+async def _referential(name: str, job_type: str, reader, candidate_email: str | None, offer_id: str | None):
     """Lit un referentiel dans le Back Office, avec cache : il change rarement.
 
     Le referentiel est propre au tenant et ne peut etre lu qu'en ouvrant le formulaire d'une
@@ -548,9 +781,12 @@ async def _referential(name: str, reader, candidate_email: str | None, offer_id:
     offer = safety.validate_offer_id(offer)
 
     def work(bot):
-        return reader(bot, email, offer)
+        return {"values": reader(bot, email, offer)}
 
-    values = await run_browser_async(f"referential-{name}", work)
+    result, pending_job_id = await run_read_job(job_type, {"candidate_email": email, "offer_id": offer}, work)
+    if pending_job_id:
+        return accepted(pending_job_id)
+    values = result["values"]
     _REFERENTIAL_CACHE[name] = (time.time(), values)
     return JSONResponse(content={"values": values, "cached": False})
 
@@ -564,6 +800,7 @@ async def referential_event_types(
     try:
         return await _referential(
             "event-types",
+            jobs.JOB_TYPE_EVENT_TYPES,
             lambda bot, email, offer: bot.read_event_types(email, offer),
             candidate_email,
             offer_id,
@@ -581,6 +818,7 @@ async def referential_document_categories(
     try:
         return await _referential(
             "document-categories",
+            jobs.JOB_TYPE_DOCUMENT_CATEGORIES,
             lambda bot, email, offer: bot.read_document_categories(email, offer),
             candidate_email,
             offer_id,
@@ -598,24 +836,44 @@ async def selftest(token: str = Depends(verify_token)):
         def work(bot):
             return bot.selftest(email, offer)
 
-        payload = await run_browser_async("selftest", work)
-        return JSONResponse(content=payload, status_code=200 if payload.get("ok") else 503)
+        result, pending_job_id = await run_read_job(
+            jobs.JOB_TYPE_SELFTEST, {"candidate_email": email or "", "offer_id": offer or ""}, work
+        )
+        if pending_job_id:
+            # Une sonde ne se suit pas sur /jobs : la supervision attend un verdict, pas un renvoi.
+            raise HTTPException(
+                status_code=503,
+                detail="Auto-test toujours en cours : réessayer",
+                headers={"Retry-After": str(browser_lock.get_retry_after_seconds())},
+            )
+        return JSONResponse(content=result, status_code=200 if result.get("ok") else 503)
     except Exception as error:
         raise_generic_server_error("/selftest", error)
 
 
 @app.post("/admin/reset-session", summary="Sortir de l'état dégradé et fermer la session navigateur")
 async def reset_session(token: str = Depends(verify_token)):
-    session_manager.reset_degraded()
-    session_manager.request_invalidate("admin_reset")
-    return {"ok": True, **session_manager.status()}
+    if config.browser_owner() == "api":
+        session_manager.reset_degraded()
+        session_manager.request_invalidate("admin_reset")
+        return {"ok": True, **session_manager.status()}
+    # La session appartient au worker. Volontairement enfilé sur la file de LECTURE et non
+    # traité comme une mutation : sortir de l'état dégradé doit rester possible même quand la
+    # file de pushs est pleine de jobs qui échouent.
+    try:
+        job = jobs.enqueue_job(jobs.JOB_TYPE_RESET_SESSION, {})
+    except Exception as error:
+        raise_generic_server_error("/admin/reset-session", error)
+    return JSONResponse(
+        content={"ok": True, "job_id": job["id"], "poll": f"/jobs/{job['id']}"},
+        status_code=202,
+        headers={"Location": f"/jobs/{job['id']}"},
+    )
 
 
 @app.get("/jobs/{job_id}", summary="Statut d'un job async")
 def get_job(job_id: str, token: str = Depends(verify_token)):
-    from . import jobs as jobs_mod
-
-    job = jobs_mod.get_job(job_id)
+    job = jobs.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     # Les chemins de fichiers temporaires ne sortent pas de l'API.

@@ -8,8 +8,9 @@ API     ?= talentsoft_bot_api
 WORKER  ?= talentsoft_bot_worker
 BASE    ?= http://127.0.0.1:42201
 
-.PHONY: help up down deploy deploy-nocache restart ps health verify-code logs logs-worker \
-        traces shell-api test lint format selftest event job reset-session discover
+.PHONY: help up down deploy deploy-nocache restart ps health worker-status verify-code logs \
+        logs-worker traces shell-api test lint format selftest event job reset-session discover \
+        check-async-env
 
 help:
 	@echo "Talentsoft-bot : ops helper"
@@ -22,6 +23,7 @@ help:
 	@echo ""
 	@echo "Vérifs"
 	@echo "  make health          GET / sur $(BASE)"
+	@echo "  make worker-status   Propriétaire du navigateur, état du worker, profondeur des files"
 	@echo "  make selftest        POST /selftest (login + candidature témoin + sélecteurs critiques)"
 	@echo "  make verify-code     Même version de code dans api ET worker (piège image stale)"
 	@echo "  make logs / logs-worker / traces / shell-api"
@@ -42,10 +44,19 @@ up:
 down:
 	$(COMPOSE) $(PROFILE) down
 
-deploy:
+# Le worker est le SEUL a piloter un navigateur. Si l'api ignore ce reglage, elle ouvre le
+# sien en plus : deux sessions sur le meme compte technique, qui se deconnectent mutuellement.
+# On refuse le deploiement plutot que de laisser la panne s'installer.
+check-async-env:
+	@grep -qE '^TS_ASYNC_JOBS_ENABLED=true$$' .env \
+	  || { echo "ERREUR: .env doit contenir TS_ASYNC_JOBS_ENABLED=true (l'api DOIT deleguer au worker)"; exit 1; }
+	@grep -qE '^REDIS_URL=.+' .env \
+	  || { echo "ERREUR: .env doit contenir REDIS_URL (ex. redis://talentsoft_bot_redis:6379/0)"; exit 1; }
+
+deploy: check-async-env
 	$(COMPOSE) $(PROFILE) up -d --build api worker redis
 
-deploy-nocache:
+deploy-nocache: check-async-env
 	$(COMPOSE) $(PROFILE) build --no-cache api worker
 	$(COMPOSE) $(PROFILE) up -d api worker redis
 
@@ -58,6 +69,10 @@ ps:
 
 health:
 	curl -m 5 $(BASE)/ ; echo
+
+worker-status:
+	@echo "Proprietaire du navigateur et etat du worker (aucune ouverture de navigateur) :"
+	@curl -sS -m 5 $(BASE)/ | python -c "import json,sys; d=json.load(sys.stdin); print(json.dumps({k: d.get(k) for k in ('browser_owner','worker','queues','login_count','degraded','degraded_reason')}, indent=2, ensure_ascii=False))"
 
 verify-code:
 	@for c in $(API) $(WORKER); do \

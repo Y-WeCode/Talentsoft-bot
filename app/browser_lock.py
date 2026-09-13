@@ -1,7 +1,20 @@
-"""Mutex navigateur process-local + contrôle d'admission de la file executor.
+"""Mutex navigateur process-local + contrôle d'admission.
 
-Repris du DR bot (selenium_lock.py) : un seul job navigateur à la fois, une file
-bornée derrière, 503 + Retry-After au-delà.
+Repris du DR bot (selenium_lock.py) : un seul job navigateur à la fois, une file bornée
+derrière, 503 + Retry-After au-delà.
+
+Le caractère **process-local** du mutex est désormais correct par construction : un seul
+processus possède un navigateur (`config.browser_owner()`). Ce n'était pas le cas quand l'api
+et le worker en ouvraient chacun un — le verrou ne sérialisait alors rien entre eux, et c'est
+précisément la panne corrigée en 0.3.0. Ne pas le remplacer par un verrou Redis : la
+démonstration de ce faux remède est dans ARCHITECTURE.md.
+
+Deux rôles distincts selon le processus :
+
+- chez le **propriétaire du navigateur** : `browser_slot()` / `try_acquire()` matérialisent
+  l'invariant « un seul job navigateur à la fois » ;
+- dans l'**api en mode worker** : le mutex n'est jamais pris ; seuls `try_admit()` /
+  `release_admit()` servent, et bornent le nombre d'**attentes synchrones** en cours.
 """
 
 from __future__ import annotations

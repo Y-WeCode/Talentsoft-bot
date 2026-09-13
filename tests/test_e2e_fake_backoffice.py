@@ -339,6 +339,43 @@ def test_update_application_combines_event_and_document(bot, tmp_path):
     assert "candidat@example.com" not in str(payload)
 
 
+def test_mutation_is_announced_once_before_the_first_write(bot, tmp_path):
+    """Le drapeau anti-rejeu doit tomber à la première écriture, pas au lancement du job.
+
+    Un événement puis un document, c'est deux soumissions : l'appelant ne doit être prévenu
+    qu'une fois, sans quoi il croirait à deux mutations distinctes.
+    """
+    calls = []
+    payload = bot.update_application(
+        candidate_email="candidat@example.com",
+        offer_id="25152",
+        event_type="En attente",
+        comment="Avec notification",
+        event_date="2026-09-14",
+        document_paths=[_pdf(tmp_path, "notifie.pdf")],
+        document_category="Autres documents",
+        on_mutation_started=lambda: calls.append("go"),
+    )
+    assert payload["mutation_started"] is True
+    assert calls == ["go"]
+
+
+def test_a_refused_comment_never_announces_a_mutation(bot):
+    """Commentaire trop long : rien n'est écrit, donc le job doit rester rejouable."""
+    calls = []
+    payload = bot.update_application(
+        candidate_email="candidat@example.com",
+        offer_id="25152",
+        event_type="En attente",
+        comment="x" * 2500,
+        event_date="2026-09-14",
+        on_mutation_started=lambda: calls.append("go"),
+    )
+    assert calls == []
+    assert payload["mutation_started"] is False
+    assert payload["actions"]["event"]["error"] == "comment_too_long"
+
+
 def test_account_can_be_chosen_by_identifier(bot_env, monkeypatch):
     """Le compte doit pouvoir être désigné par son identifiant ASCII.
 

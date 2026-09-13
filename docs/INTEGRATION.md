@@ -21,6 +21,9 @@ Version de l'API : **0.2.0**.
 
 ---
 
+> **Vous migrez depuis la 0.2.0 ?** Lire d'abord [MIGRATION-0.3.0.md](MIGRATION-0.3.0.md) : un seul
+> changement oblige à toucher au code, tout le reste est additif.
+
 ## 1. Ce que fait le bot
 
 Le bot pilote le Back Office recruteur Cegid Talentsoft dans un navigateur, pour réaliser les deux
@@ -127,8 +130,9 @@ moins exposé aux échecs partiels que deux appels séparés.
 | Méthode | Route | Usage |
 | --- | --- | --- |
 | `POST` | `/selftest` | Auto-test lecture seule. `503` si un sélecteur ne matche plus |
-| `POST` | `/admin/reset-session` | Sortir de l'état dégradé, fermer la session navigateur |
-| `GET` | `/jobs/{job_id}` | Statut d'un job asynchrone |
+| `POST` | `/admin/reset-session` | Sortir de l'état dégradé, fermer la session navigateur. `202` : la demande est traitée par le worker |
+| `GET` | `/jobs/{job_id}` | Statut d'un job |
+| `GET` | `/` | Santé : `browser_owner`, bloc `worker`, profondeur des files. Sans authentification |
 
 ---
 
@@ -250,13 +254,13 @@ que c'est exactement le nôtre**. Voir §11.
 | Code | Cause | Mutation ? | Rejeu |
 | --- | --- | --- | --- |
 | `200` | Candidature atteinte — lire le détail par action | selon les actions | — |
-| `202` | Job asynchrone accepté (`?async=1`) | pas encore | interroger `/jobs/{id}` |
+| `202` | Job accepté : `?async=1`, **ou** attente synchrone dépassée | peut-être en cours | interroger `/jobs/{id}`, jamais rejouer |
 | `400` | Validation : email malformé, offre invalide, extension refusée, ni commentaire ni document | non | après correction |
 | `401` | Token absent ou invalide | non | non |
 | `404` | Candidat introuvable, ou sans candidature sur cette offre | non | oui, après correction |
 | `409` | Requête identique en cours, ou **plusieurs candidats** pour cet email | non | après levée d'ambiguïté |
 | `413` | Fichier trop volumineux | non | non |
-| `503` | Navigateur occupé ou session dégradée. En-tête `Retry-After` | non | oui, après le délai |
+| `503` | Navigateur occupé, worker absent, ou session dégradée. En-tête `Retry-After` | non | oui, après le délai |
 | `500` | Erreur générique (détail dans les logs du bot) | **peut-être** | prudence |
 
 Sur `400`, `404`, `409` et `503`, aucune mutation n'a eu lieu et la clé d'idempotence est libérée : un rejeu
@@ -266,9 +270,40 @@ Sur `500`, la mutation a pu démarrer. Ne pas rejouer à l'aveugle.
 
 ### `503` : un seul job à la fois
 
-Le bot sérialise tout (un navigateur, une file d'admission bornée). Au-delà, il répond `503` avec
+Le bot sérialise tout : **un seul navigateur pour tout le déploiement**, parce que le tenant Talentsoft
+n'admet qu'une session active par compte technique. Au-delà de la file d'admission, il répond `503` avec
 `Retry-After`. Le client doit respecter ce délai plutôt que de réessayer immédiatement — une file d'attente
 côté Hippolyte.ai est préférable à des retries serrés.
+
+Trois causes distinctes, toutes rejouables, toutes sans mutation :
+
+- file d'attente pleine (`Retry-After` court) ;
+- **worker indisponible** : personne ne dépile ; le bot refuse plutôt que de faire attendre pour rien ;
+- session `degraded` (`Retry-After: 600`) : trop d'échecs de login, intervention humaine requise.
+
+### `202` : l'attente a expiré, le job continue
+
+**C'est le point de contrat qui a changé.** Un appel synchrone attend le résultat pendant
+`SYNC_WAIT_TIMEOUT_SECONDS` (120 s par défaut). Au-delà il rend :
+
+```http
+202 { "job_id": "…", "status": "queued" | "running", "poll": "/jobs/…" }
+Location: /jobs/…
+```
+
+Ce corps est **identique pour tous les `202`** : attente dépassée, `?async=1`, ou rejeu d'une clé dont le job
+tourne encore. Un seul cas à coder.
+
+À traiter **comme un job asynchrone** : interroger `GET /jobs/{job_id}` jusqu'à `completed` ou `failed`.
+
+> Ne **jamais** rejouer après un `202`, ni sous la même clé, ni sous une nouvelle.
+>
+> À cet instant l'écriture est peut-être en cours dans le Back Office. C'est exactement pour cela que le
+> bot répond `202` et non `504` : un `5xx` inviterait à rejouer, et créerait un doublon dans le dossier du
+> candidat.
+
+Rejouer le **même** appel avec la **même** `idempotency_key` est en revanche sans danger : le bot reconnaît
+la clé et renvoie le `job_id` déjà en cours, avec un nouveau `202`.
 
 ---
 
@@ -288,20 +323,49 @@ convient bien — et **jamais** d'un horodatage ou d'un aléa, qui la rendraient
 
 ---
 
-## 9. Mode asynchrone
+## 9. Jobs et suivi
 
-Recommandé pour les pushs avec document derrière un reverse proxy. Requiert Redis et
-`TS_ASYNC_JOBS_ENABLED` côté bot.
+En production, **tout passe par une file** : lectures, écritures et `/selftest`. Le processus worker est le
+seul à piloter un navigateur, parce que le tenant n'admet qu'une session par compte technique. Un appel
+synchrone se contente donc d'attendre le résultat de son job, et bascule en `202` au-delà du budget.
+
+`?async=1` sur `/update-application` court-circuite l'attente et rend le `202` immédiatement — utile pour un
+push volumineux derrière un reverse proxy au `read_timeout` serré. Contrairement aux appels synchrones, ce
+chemin **empile même si le worker est arrêté** : c'est voulu (un redémarrage de worker ne doit pas rejeter les
+jobs), mais cela suppose de surveiller `GET /` — un `worker.alive: false` durable signifie que les jobs
+s'accumulent sans être traités.
 
 ```http
 POST /update-application?async=1
-→ 202 { "job_id": "…", "status": "queued" }
+→ 202 { "job_id": "…", "status": "queued", "poll": "/jobs/…" }
 
 GET /jobs/{job_id}
-→ { "status": "queued" | "running" | "completed" | "failed", "result": …, "error": … }
+→ {
+    "status": "queued" | "running" | "completed" | "failed",
+    "result": …,             // contrat du mode synchrone
+    "error_code": "…",       // code stable, analysable par machine
+    "error_detail": "…",     // diagnostic destiné à un humain, à ne PAS analyser
+    "mutation_started": false,
+    "mutation_may_have_happened": false
+  }
 ```
 
-`result` porte le même contrat qu'en mode synchrone.
+`error_code` correspond au statut HTTP qu'un appel synchrone aurait reçu :
+
+| `error_code` | HTTP équivalent | Rejeu |
+| --- | --- | --- |
+| `candidate_not_found` | `404` | après correction |
+| `application_not_on_offer` | `404` | après correction |
+| `ambiguous_candidate` | `409` | après levée d'ambiguïté |
+| `session_degraded` | `503` | après intervention |
+| `browser_busy` | `503` | après `Retry-After` |
+| `session_bootstrap_failed` | `500` | oui : aucune écriture n'a eu lieu |
+| `browser_fatal`, `job_timeout`, `session_expired`, `internal_error` | `500` | **prudence**, vérifier d'abord |
+| `mutation_started_no_rejeu` | `500` | non |
+
+`mutation_started` dit qu'une écriture a été **engagée** : c'est ce drapeau qui interdit le rejeu. Il ne tombe
+qu'à la première écriture réelle — un échec au login, à la recherche ou à la sélection laisse donc le job
+pleinement rejouable.
 
 Un job dont `mutation_started` est déjà vrai n'est **jamais rejoué** par le worker : il passe en `failed`
 avec `error: "mutation_started_no_rejeu"`. C'est volontaire — mieux vaut un job en échec explicite qu'un
@@ -425,6 +489,11 @@ async pushSynthesis(
     throw err;
   }
 
+  // 202 : l'attente a expiré, le job continue. On le suit, on ne le rejoue JAMAIS.
+  if (res.status === 202) {
+    return this.followJob(operation, res.data.job_id);
+  }
+
   const { actions } = res.data.update_details;
   const results = [actions.event, ...(actions.documents ?? [])].filter(Boolean);
 
@@ -440,6 +509,35 @@ async pushSynthesis(
   }
 
   return res.data.success ? OutboundStatus.DONE : OutboundStatus.FAILED;
+}
+```
+
+### Suivre un job après un `202`
+
+```ts
+private async followJob(
+  operation: TalentsoftOutboundOperation,
+  jobId: string,
+): Promise<OutboundStatus> {
+  // Persister jobId AVANT de sortir : un redémarrage ne doit pas perdre la trace du job,
+  // sans quoi on ne saurait plus si l'écriture a eu lieu.
+  await this.operations.update(operation.id, { talentsoftJobId: jobId });
+
+  const { data } = await this.http.get(`/jobs/${jobId}`, {
+    headers: { Authorization: `Bearer ${this.token}` },
+  });
+
+  if (data.status === 'queued' || data.status === 'running') {
+    return this.scheduleRetry(operation, 30); // on REinterroge, on ne repousse pas
+  }
+  if (data.status === 'failed') {
+    // Une écriture engagée puis perdue : jamais de rejeu automatique.
+    if (data.mutation_started) return OutboundStatus.INDETERMINATE;
+    return ['candidate_not_found', 'application_not_on_offer'].includes(data.error_code)
+      ? OutboundStatus.TARGET_NOT_FOUND
+      : OutboundStatus.FAILED;
+  }
+  return this.interpretResult(data.result); // même lecture qu'en mode synchrone
 }
 ```
 
@@ -463,6 +561,7 @@ visible par les recruteurs.
 
 ### Les trois réflexes
 
+0. Un **`202` se suit**, il ne se rejoue pas : `GET /jobs/{id}` jusqu'à un état final.
 1. **Toujours** fournir une `idempotency_key` stable, dérivée de l'objet métier.
 2. **Ne jamais** rejouer sur `unverified` sans avoir relu l'historique.
 3. Traiter `category_occupied` comme un **cas métier** demandant un arbitrage, pas comme une erreur
@@ -489,6 +588,11 @@ visible par les recruteurs.
       défaut d'un automate ne doit jamais en être un.
 - [ ] `TS_DEFAULT_DOCUMENT_CATEGORY` pointant vers une catégorie non critique.
 - [ ] `TS_SELFTEST_CANDIDATE_EMAIL` et `TS_SELFTEST_OFFER_ID` pour la supervision.
+- [ ] `TS_ASYNC_JOBS_ENABLED=true` et `REDIS_URL` renseignés, **pour l'api comme pour le worker**.
+      Sans cela l'api ouvre son propre navigateur en plus de celui du worker, et les deux sessions se
+      déconnectent mutuellement sur le même compte technique. `make deploy` refuse ce cas de figure.
+- [ ] `SYNC_WAIT_TIMEOUT_SECONDS` **inférieur** au `proxy_read_timeout` du reverse proxy.
+- [ ] Aucun autre déploiement (autre hôte, poste de développement) n'utilise le même `TS_USERNAME`.
 
 ### Validation
 
@@ -497,6 +601,16 @@ visible par les recruteurs.
 - [ ] Comportement vérifié sur un email correspondant à **plusieurs** candidats (attendu : `409`).
 - [ ] Comportement vérifié sur une catégorie déjà occupée (attendu : `category_occupied`, et le document
       d'origine **intact**).
+- [ ] `GET /` renvoie `browser_owner: "worker"` et `worker.alive: true`.
+- [ ] Un push **et** un `/selftest` lancés en parallèle : le selftest attend son tour, et `login_count`
+      ne bouge pas. C'est la preuve qu'une seule session existe.
+- [ ] Dix pushs enchaînés : `login_count` **stable**. C'est la preuve que la session est réutilisée, et la
+      condition de tenue des dizaines de pushs par heure.
+- [ ] Worker arrêté : `/update-application` répond `503`, et **aucun** navigateur n'apparaît côté api
+      (`docker compose logs api | grep -c Chromium` doit rester à zéro).
+- [ ] Redis coupé : toutes les routes navigateur rendent un `503` propre, et `GET /` reste en `200` avec
+      `worker.alive: false`.
+- [ ] Côté Hippolyte.ai : un `202` est bien suivi par `GET /jobs/{id}` et **jamais** rejoué.
 
 ### Exploitation
 
@@ -505,6 +619,7 @@ visible par les recruteurs.
 - [ ] Supervision de `degraded` sur `GET /` : au-delà de `LOGIN_MAX_FAILURES` échecs de login, le bot cesse
       toute tentative pour protéger le compte technique d'un verrouillage. Sortie par
       `POST /admin/reset-session`.
-- [ ] `proxy_read_timeout` du reverse proxy supérieur à la durée d'un push avec document, ou mode
-      asynchrone activé.
-- [ ] Un seul replica par tenant.
+- [ ] `proxy_read_timeout` du reverse proxy supérieur à `SYNC_WAIT_TIMEOUT_SECONDS`.
+- [ ] Un seul replica par tenant, `api` et `worker` sur **le même hôte** : ils partagent le volume
+      `./uploads`, par lequel l'api transmet les fichiers au worker.
+- [ ] Supervision de `worker.alive` sur `GET /` : un worker absent bloque toutes les écritures.

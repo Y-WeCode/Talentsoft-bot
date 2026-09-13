@@ -234,3 +234,30 @@ def redis_url() -> str:
 
 def async_jobs_enabled() -> bool:
     return env_bool("TS_ASYNC_JOBS_ENABLED", False) and bool(redis_url())
+
+
+def browser_owner() -> str:
+    """Quel processus a le droit d'ouvrir un navigateur : « worker » ou « api ».
+
+    Le tenant n'admet qu'une session active par compte technique. Deux processus qui ouvrent
+    chacun leur Chromium se déconnectent donc mutuellement, jusqu'à l'état dégradé. L'invariant
+    est : **un déploiement = un propriétaire de navigateur**.
+
+    Avec la file activée, c'est le worker ; sinon l'API, qui reste mono-processus (dev, tests,
+    petites installations).
+    """
+    return "worker" if async_jobs_enabled() else "api"
+
+
+def sync_wait_timeout_seconds() -> int:
+    """Combien de temps un appel synchrone attend le résultat de son job.
+
+    Doit rester **inférieur** au read timeout du reverse proxy : au-delà, le client reçoit une
+    coupure au lieu du 202 qui lui dit où suivre son job.
+    """
+    return env_int("SYNC_WAIT_TIMEOUT_SECONDS", 120, minimum=1)
+
+
+def sync_read_wait_timeout_seconds() -> int:
+    """Attente des jobs de lecture, plus courts : historique, référentiels, selftest."""
+    return env_int("SYNC_READ_WAIT_TIMEOUT_SECONDS", 60, minimum=1)
