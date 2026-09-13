@@ -70,9 +70,16 @@ ps:
 health:
 	curl -m 5 $(BASE)/ ; echo
 
+# Aucune dependance sur l'hote : on met en forme avec ce qui est installe, sinon on affiche brut.
+# Une cible d'exploitation qui exige un interpreteur echoue le jour ou on en a besoin.
 worker-status:
 	@echo "Proprietaire du navigateur et etat du worker (aucune ouverture de navigateur) :"
-	@curl -sS -m 5 $(BASE)/ | python -c "import json,sys; d=json.load(sys.stdin); print(json.dumps({k: d.get(k) for k in ('browser_owner','worker','queues','login_count','degraded','degraded_reason')}, indent=2, ensure_ascii=False))"
+	@curl -sS -m 5 $(BASE)/ | { \
+	  if command -v jq >/dev/null 2>&1; then \
+	    jq '{browser_owner, worker, queues, login_count, degraded, degraded_reason}'; \
+	  elif python3 -c '' >/dev/null 2>&1; then \
+	    python3 -m json.tool; \
+	  else cat; echo; fi; }
 
 verify-code:
 	@for c in $(API) $(WORKER); do \
@@ -134,5 +141,6 @@ endif
 	@TOKEN=$$(grep '^API_TOKEN=' .env | cut -d= -f2- | sed 's/^["'\'']//;s/["'\'']$$//') ; \
 	curl -sS "$(BASE)/jobs/$(ID)" -H "Authorization: Bearer $$TOKEN" ; echo
 
+# Outil de developpement, lance depuis un poste : python y est un prerequis assume.
 discover:
 	python tools/discover.py --out discovery --login --dump $(if $(URL),--open "$(URL)",)
