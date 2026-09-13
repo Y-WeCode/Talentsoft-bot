@@ -419,7 +419,9 @@ def test_async_mode_enqueues_and_returns_202(app_module, fake_bot, monkeypatch):
         headers=AUTH,
     )
     assert response.status_code == 202
-    assert response.json() == {"job_id": "job-1", "status": "queued"}
+    # Meme corps que tous les autres 202 : l'appelant n'a qu'un seul cas a coder.
+    assert response.json() == {"job_id": "job-1", "status": "queued", "poll": "/jobs/job-1"}
+    assert response.headers["Location"] == "/jobs/job-1"
     assert captured["candidate_email"] == "candidat@example.com"
     assert captured["offer_id"] == "25152"
     assert len(captured["document_paths"]) == 1

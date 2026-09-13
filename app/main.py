@@ -211,15 +211,19 @@ def http_error_for(code: str) -> HTTPException:
     return HTTPException(status_code=status, detail=detail, headers=headers)
 
 
-def accepted(job_id: str) -> JSONResponse:
+def accepted(job_id: str, status: str = "running") -> JSONResponse:
     """202 : le job continue côté worker, l'appelant le suit sur /jobs/{id}.
+
+    Corps et en-têtes identiques quel que soit le chemin — `?async=1`, attente dépassée, ou rejeu
+    d'une clé dont le job tourne encore. La distinction n'apprend rien à l'appelant : dans les
+    trois cas il doit interroger `/jobs/{id}`.
 
     Surtout pas un 5xx ici : à cet instant la mutation est peut-être en cours, et un 5xx
     inviterait l'appelant à rejouer — exactement ce qu'il ne faut jamais faire après une écriture
     engagée.
     """
     return JSONResponse(
-        content={"job_id": job_id, "status": "running", "poll": f"/jobs/{job_id}"},
+        content={"job_id": job_id, "status": status, "poll": f"/jobs/{job_id}"},
         status_code=202,
         headers={"Location": f"/jobs/{job_id}", "Retry-After": str(browser_lock.get_retry_after_seconds())},
     )
@@ -590,7 +594,7 @@ async def update_application(
             if state == "in_progress":
                 existing = jobs.job_id_for_idempotency_key(key)
                 if existing:
-                    return JSONResponse(content={"job_id": existing, "status": "running"}, status_code=202)
+                    return accepted(existing)
                 raise _already_in_progress()
             job = jobs.enqueue_update_application(
                 candidate_email=email,
@@ -603,7 +607,7 @@ async def update_application(
                 idempotency_key=key,
             )
             document_paths = []  # propriété transférée au worker
-            return JSONResponse(content={"job_id": job["id"], "status": job["status"]}, status_code=202)
+            return accepted(job["id"], status=job["status"])
 
         paths_for_job = list(document_paths)
 

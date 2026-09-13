@@ -284,9 +284,12 @@ Trois causes distinctes, toutes rejouables, toutes sans mutation :
 `SYNC_WAIT_TIMEOUT_SECONDS` (120 s par défaut). Au-delà il rend :
 
 ```http
-202 { "job_id": "…", "status": "running", "poll": "/jobs/…" }
+202 { "job_id": "…", "status": "queued" | "running", "poll": "/jobs/…" }
 Location: /jobs/…
 ```
+
+Ce corps est **identique pour tous les `202`** : attente dépassée, `?async=1`, ou rejeu d'une clé dont le job
+tourne encore. Un seul cas à coder.
 
 À traiter **comme un job asynchrone** : interroger `GET /jobs/{job_id}` jusqu'à `completed` ou `failed`.
 
@@ -331,7 +334,7 @@ s'accumulent sans être traités.
 
 ```http
 POST /update-application?async=1
-→ 202 { "job_id": "…", "status": "queued" }
+→ 202 { "job_id": "…", "status": "queued", "poll": "/jobs/…" }
 
 GET /jobs/{job_id}
 → {

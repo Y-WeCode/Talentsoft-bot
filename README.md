@@ -190,7 +190,11 @@ Un `202` se poursuit par `GET /jobs/{job_id}`, **jamais** par un rejeu sous une 
 instant la mutation est peut-être en cours. C'est pour la même raison qu'une attente dépassée ne rend pas un `5xx`,
 qui inviterait à rejouer.
 
-`?async=1` sur `/update-application` renvoie directement `202 {"job_id", "status"}` sans attendre.
+Tout `202` a le même corps `{"job_id", "status", "poll"}` et le même en-tête `Location`, quel que soit le
+chemin qui l'a produit : `?async=1`, attente dépassée, ou rejeu d'une clé dont le job tourne encore. Dans les
+trois cas l'appelant fait la même chose — interroger `/jobs/{job_id}`.
+
+`?async=1` sur `/update-application` renvoie ce `202` sans attendre.
 
 `GET /jobs/{job_id}` : `status` passe de `queued` à `running` puis `completed` (`result` = contrat du mode sync) ou
 `failed`, avec `error_code` (code stable, analysable) et `error_detail` (diagnostic pour un humain). Un job déjà

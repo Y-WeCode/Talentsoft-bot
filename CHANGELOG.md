@@ -37,6 +37,8 @@ dans l'api pendant que le worker tenait son propre navigateur.
   est peut-être en cours, et un `5xx` inviterait à rejouer.
 - Rejeu d'une clé d'idempotence dont le job tourne encore : `202` avec le **même** `job_id`, au lieu du `409`
   inexploitable.
+- **Un seul corps de réponse `202`** — `{job_id, status, poll}` plus l'en-tête `Location` — quel que soit le
+  chemin : `?async=1`, attente dépassée, ou rejeu. L'appelant n'a qu'un cas à coder.
 - `503` + `Retry-After` quand le worker est absent ou sa session `degraded`, sans rien empiler.
 - `GET /jobs/{id}` expose `error_code` (stable, analysable) et `error_detail` (diagnostic humain) au lieu du
   seul `"HTTPException"`, ainsi que `mutation_may_have_happened`.
