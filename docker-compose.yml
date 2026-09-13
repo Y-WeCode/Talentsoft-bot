@@ -3,6 +3,12 @@ services:
     image: redis:7-alpine
     container_name: talentsoft_bot_redis
     # Port non publié : api et worker joignent redis par le réseau Compose interne.
+    # Alias explicite : sur un hôte qui héberge plusieurs projets, le nom générique « redis »
+    # peut désigner le Redis d'un voisin — le bot lui parlerait sans le savoir.
+    networks:
+      default:
+        aliases:
+          - talentsoft_bot_redis
     restart: unless-stopped
     profiles:
       - async
@@ -17,6 +23,8 @@ services:
     env_file:
       - .env
     environment:
+      # Vide = mode synchrone. Sinon viser le conteneur par SON nom (voir l alias du service
+      # redis) : sur un hote partage, « redis » peut designer le Redis d un voisin.
       REDIS_URL: ${REDIS_URL:-}
       TS_ASYNC_JOBS_ENABLED: ${TS_ASYNC_JOBS_ENABLED:-false}
       HEADLESS_MODE: "true"
@@ -45,7 +53,9 @@ services:
     env_file:
       - .env
     environment:
-      REDIS_URL: redis://redis:6379/0
+      # Nom du conteneur, pas le nom generique : voir l'alias du service redis.
+      # Surchargeable par .env pour pointer un Redis externe.
+      REDIS_URL: ${REDIS_URL:-redis://talentsoft_bot_redis:6379/0}
       TS_ASYNC_JOBS_ENABLED: "true"
       HEADLESS_MODE: "true"
     volumes:

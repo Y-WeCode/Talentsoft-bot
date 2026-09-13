@@ -549,3 +549,30 @@ def test_identification_failure_releases_idempotency_key(app_module, monkeypatch
     assert client.post("/update-application", data=data, headers=AUTH).status_code == 404
     assert client.post("/update-application", data=data, headers=AUTH).status_code == 404
     assert bot.update_calls == 2
+
+
+def test_unavailable_job_queue_is_503_not_500(app_module, monkeypatch):
+    """Une file de jobs injoignable est une panne d infrastructure, pas une erreur de traitement.
+
+    Le client doit pouvoir rejouer : d ou un 503 avec Retry-After, et non un 500 qui laisserait
+    croire que quelque chose est casse cote traitement. Aucune mutation n a eu lieu.
+    """
+    import redis
+
+    from app import jobs as jobs_mod
+
+    monkeypatch.setattr(jobs_mod, "is_async_jobs_enabled", lambda: True)
+
+    def refuse(*args, **kwargs):
+        raise redis.exceptions.AuthenticationError("Authentication required.")
+
+    monkeypatch.setattr(jobs_mod, "enqueue_update_application", refuse)
+
+    client = TestClient(app_module.app)
+    response = client.post(
+        "/update-application?async=1",
+        data={"candidate_email": "candidat@example.com", "offer_id": "25152", "comment": "x"},
+        headers=AUTH,
+    )
+    assert response.status_code == 503
+    assert "Retry-After" in response.headers
