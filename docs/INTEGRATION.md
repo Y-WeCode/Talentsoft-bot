@@ -21,6 +21,9 @@ Version de l'API : **0.2.0**.
 
 ---
 
+> **Vous migrez depuis la 0.2.0 ?** Lire d'abord [MIGRATION-0.3.0.md](MIGRATION-0.3.0.md) : un seul
+> changement oblige à toucher au code, tout le reste est additif.
+
 ## 1. Ce que fait le bot
 
 Le bot pilote le Back Office recruteur Cegid Talentsoft dans un navigateur, pour réaliser les deux

@@ -5,6 +5,8 @@
 Un seul navigateur pour tout le déploiement, piloté par une file. **Un `202` peut désormais répondre à un
 appel synchrone** : c'est le seul changement de contrat pour l'appelant.
 
+Note de migration pour l'intégrateur : [docs/MIGRATION-0.3.0.md](docs/MIGRATION-0.3.0.md).
+
 ### Le problème corrigé
 
 L'api et le worker ouvraient **chacun leur Chromium**, avec le même compte technique. Le tenant n'admettant
