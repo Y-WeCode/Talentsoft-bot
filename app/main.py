@@ -130,9 +130,37 @@ def cleanup_files(paths: list[str]) -> None:
         cleanup_file(path)
 
 
+def _is_redis_unavailable(error: Exception) -> bool:
+    """La file de jobs est-elle injoignable ou refuse-t-elle la connexion ?
+
+    Distinguer ce cas compte pour l'appelant : une file indisponible est une panne
+    d'infrastructure passagère, qui mérite un `503` et un rejeu, là où un `500` laisse croire
+    à une erreur de traitement. Aucune mutation n'a eu lieu — l'échec précède le navigateur.
+    """
+    try:
+        from redis import exceptions as redis_exceptions
+    except Exception:
+        return False
+    return isinstance(
+        error,
+        redis_exceptions.ConnectionError
+        | redis_exceptions.AuthenticationError
+        | redis_exceptions.TimeoutError
+        | redis_exceptions.ResponseError,
+    )
+
+
 def raise_generic_server_error(route_name: str, error: Exception):
     if isinstance(error, HTTPException):
         raise error
+    if _is_redis_unavailable(error):
+        # Le détail nomme la cause sans exposer l'URL de connexion, qui porte le mot de passe.
+        logger.error(f"redis_indisponible route={route_name} error={type(error).__name__}")
+        raise HTTPException(
+            status_code=503,
+            detail="File de jobs indisponible : réessayer, ou appeler en mode synchrone",
+            headers={"Retry-After": str(browser_lock.get_retry_after_seconds())},
+        ) from error
     logger.exception(f"Erreur dans {route_name}: {type(error).__name__}")
     raise HTTPException(status_code=500, detail="Erreur interne du serveur")
 
