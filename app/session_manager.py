@@ -131,6 +131,15 @@ class SessionManager:
         self._invalidate_requested = reason
 
     def shutdown(self) -> None:
+        """Ne prétend fermer un navigateur que s'il y en a un.
+
+        L'API n'en ouvre aucun quand le worker en est propriétaire : y journaliser une fermeture
+        contredirait l'invariant de ce déploiement, et enverrait chercher une session qui n'a
+        jamais existé.
+        """
+        if self._state is None:
+            logger.info("Arrêt session manager: aucune session ouverte")
+            return
         logger.info("Arrêt session manager: fermeture du navigateur")
         self._close_state()
 
