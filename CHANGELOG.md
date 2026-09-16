@@ -77,10 +77,17 @@ dans l'api pendant que le worker tenait son propre navigateur.
   ligne visible rendait « Type<TAB>Date », la même ligne repliée « TypeDate ». La référence
   d'offre et la signature d'événement devenaient dépendantes du rendu. La lecture se fait
   maintenant cellule par cellule, avec un résultat identique dans les deux états.
+- **La relecture ne dépend plus du succès de la resélection.** Une resélection systématiquement
+  en échec faisait expirer le budget de 15 s sans qu'une seule lecture soit tentée : le bot
+  rapportait `unverified` sur une écriture aboutie, et le `reason` journalisé désignait une cause
+  qui n'avait jamais été mesurée. La resélection améliore les conditions de lecture, elle ne les
+  conditionne pas — deux tentatives au plus, puis tout le budget revient à la lecture.
 - Nouveau `WARNING verify_failed` en cas d'échec de relecture, avec la **forme** du tableau
   (compteurs par type de ligne, présence de `selectedLine`) et jamais son texte, qui porte des
   données personnelles. Le `reason=` distingue `table_missing`, `target_not_found` et
-  `count_unchanged` sans qu'il faille ouvrir une trace.
+  `count_unchanged`, plus `reselect_failed` quand aucune resélection n'a abouti, sans qu'il
+  faille ouvrir une trace. Le libellé des lignes de **candidature** (donnée d'offre) est
+  journalisé dans ce cas ; celui des lignes d'événement, qui porte un auteur, jamais.
 
 - `mutation_started` n'est plus posé au lancement du job mais à la **première écriture réelle**, via un
   callback `on_mutation_started` appelé par le scraper juste avant la première soumission. Un job qui
