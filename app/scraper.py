@@ -749,14 +749,36 @@ class TalentsoftBot:
             result.update({"ok": False, "error": "unverified", "mutation_may_have_happened": True})
         return result
 
+    # Le repliement provoqué par le postback est déterministe, pas une course : une resélection
+    # suffit en principe, la seconde couvre un postback encore en vol.
+    _VERIFY_MAX_RESELECTIONS = 2
+
     def _verify_event_added(self, app_page: ApplicationPage, offer_id: str, signature: str, before_count: int) -> bool:
         """Vérification FAIBLE : une ligne de plus, portant le bon type et la bonne date.
 
         Le commentaire n'étant pas affiché, on ne peut pas certifier que la ligne observée est
         exactement la nôtre — d'où `verification: weak` dans la réponse.
+
+        `before_count` a été mesuré candidature **dépliée**. Le postback de validation la replie
+        et retire `tr.selectedLine` (voir app/ts_selectors.py) : relire sans resélectionner
+        compare deux états différents de la page, et fait conclure `unverified` alors que
+        l'événement a bien été créé. On rétablit donc l'état avant de compter.
+
+        Les deux conditions sont conservées à dessein. Se contenter de la signature laisserait un
+        événement préexistant de même type et même date valider une écriture qui n'a pas eu
+        lieu — l'ambiguïté que `_event_signature` refuse explicitement.
         """
+        reselected = 0
+        rows: list[str] = []
         waited_until = time.monotonic() + 15.0
         while time.monotonic() < waited_until:
+            if reselected < self._VERIFY_MAX_RESELECTIONS:
+                if self._reselect_application(app_page, offer_id):
+                    reselected += 1
+                else:
+                    self.page.wait_for_timeout(500)
+                    continue
+
             rows = app_page.list_events(offer_id)
             if len(rows) > before_count:
                 if not signature:
@@ -765,7 +787,45 @@ class TalentsoftBot:
                 if any(all(token in row for token in tokens) for row in rows):
                     return True
             self.page.wait_for_timeout(500)
+
+        self._log_verify_failure(app_page, before_count, len(rows), reselected)
         return False
+
+    def _reselect_application(self, app_page: ApplicationPage, offer_id: str) -> bool:
+        """Redéplie la candidature après le postback. False si la page n'est pas encore prête.
+
+        Une mutation est déjà engagée à cet instant : un échec transitoire pendant le postback
+        doit faire retenter, jamais interrompre la vérification.
+        """
+        try:
+            app_page.select_application_by_offer(offer_id)
+            return True
+        except (ApplicationNotOnOffer, SelectorNotFound, PlaywrightError) as error:
+            logger.info(f"verify_reselect_retry error={type(error).__name__}")
+            return False
+
+    def _log_verify_failure(self, app_page: ApplicationPage, before: int, after: int, reselected: int) -> None:
+        """Journalise la FORME du tableau, jamais son texte : les lignes portent des données personnelles.
+
+        Ces compteurs suffisent à trancher sans trace : `table_missing` désigne une page qui
+        n'est plus la bonne, `target_not_found` une candidature que le bot ne reconnaît plus
+        (des événements existent mais aucun ne lui est rattaché), `count_unchanged` une écriture
+        qui n'est réellement pas arrivée dans l'historique.
+        """
+        shape = app_page.history_shape()
+        if not shape.get("table"):
+            reason = "table_missing"
+        elif after == 0 and shape.get("events"):
+            reason = "target_not_found"
+        else:
+            reason = "count_unchanged"
+        logger.warning(
+            f"verify_failed reason={reason} rows_before={before} rows_after={after} "
+            f"applications={shape.get('applications', 0)} events={shape.get('events', 0)} "
+            f"other={shape.get('other', 0)} "
+            f"selected_line={str(bool(shape.get('selected_line'))).lower()} "
+            f"reselected={reselected}"
+        )
 
     def add_documents(
         self,
