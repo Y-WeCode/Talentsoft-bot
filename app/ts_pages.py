@@ -781,6 +781,14 @@ class ApplicationPage:
             logger.debug(f"history_shape_failed error={type(error).__name__}")
             return empty
 
+    def application_row_texts(self) -> list[str]:
+        """Libellés des lignes de candidature — « Réponse à offre <intitulé> ( réf. … ) ».
+
+        De la donnée d'offre, publique, contrairement aux lignes d'événement qui portent le type
+        et l'auteur. Sert au diagnostic d'un appariement d'offre qui échoue.
+        """
+        return [text for kind, text in self._history_rows() if kind == "application"]
+
     def list_events(self, offer_id: str | None = None) -> list[str]:
         """Événements de la candidature développée (ou de toutes si `offer_id` est absent)."""
         rows = self._history_rows()

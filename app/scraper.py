@@ -749,9 +749,14 @@ class TalentsoftBot:
             result.update({"ok": False, "error": "unverified", "mutation_may_have_happened": True})
         return result
 
-    # Le repliement provoqué par le postback est déterministe, pas une course : une resélection
-    # suffit en principe, la seconde couvre un postback encore en vol.
-    _VERIFY_MAX_RESELECTIONS = 2
+    # Nombre de TENTATIVES de resélection, abouties ou non. Le repliement provoqué par le
+    # postback est déterministe, pas une course : deux essais suffisent, et au-delà on laisse
+    # tout le budget restant à la lecture.
+    _VERIFY_MAX_RESELECT_ATTEMPTS = 2
+
+    # Budget de relecture. Le Back Office met quelques secondes à refléter une écriture ; au-delà
+    # on rapporte `unverified` plutôt que d'immobiliser l'unique navigateur.
+    _VERIFY_BUDGET_SECONDS = 15.0
 
     def _verify_event_added(self, app_page: ApplicationPage, offer_id: str, signature: str, before_count: int) -> bool:
         """Vérification FAIBLE : une ligne de plus, portant le bon type et la bonne date.
@@ -768,16 +773,19 @@ class TalentsoftBot:
         événement préexistant de même type et même date valider une écriture qui n'a pas eu
         lieu — l'ambiguïté que `_event_signature` refuse explicitement.
         """
-        reselected = 0
+        attempts = 0
+        succeeded = 0
         rows: list[str] = []
-        waited_until = time.monotonic() + 15.0
+        waited_until = time.monotonic() + self._VERIFY_BUDGET_SECONDS
         while time.monotonic() < waited_until:
-            if reselected < self._VERIFY_MAX_RESELECTIONS:
+            # La resélection AMÉLIORE les conditions de lecture, elle ne les conditionne pas :
+            # même repliée, une ligne reste lisible depuis que le texte est assemblé cellule par
+            # cellule. Faire dépendre la lecture de son succès affamait la vérification — une
+            # resélection systématiquement en échec faisait expirer le budget sans jamais lire.
+            if attempts < self._VERIFY_MAX_RESELECT_ATTEMPTS:
+                attempts += 1
                 if self._reselect_application(app_page, offer_id):
-                    reselected += 1
-                else:
-                    self.page.wait_for_timeout(500)
-                    continue
+                    succeeded += 1
 
             rows = app_page.list_events(offer_id)
             if len(rows) > before_count:
@@ -788,7 +796,7 @@ class TalentsoftBot:
                     return True
             self.page.wait_for_timeout(500)
 
-        self._log_verify_failure(app_page, before_count, len(rows), reselected)
+        self._log_verify_failure(app_page, before_count, len(rows), attempts, succeeded)
         return False
 
     def _reselect_application(self, app_page: ApplicationPage, offer_id: str) -> bool:
@@ -800,21 +808,34 @@ class TalentsoftBot:
         try:
             app_page.select_application_by_offer(offer_id)
             return True
-        except (ApplicationNotOnOffer, SelectorNotFound, PlaywrightError) as error:
+        except (ApplicationNotOnOffer, SelectorNotFound) as error:
+            # Message construit par ce dépôt, à partir du seul identifiant d'offre : il distingue
+            # « offre absente de la fiche » de « candidature non active après sélection », ce que
+            # le seul type d'exception ne dit pas.
+            logger.info(f"verify_reselect_retry error={type(error).__name__} detail={str(error)[:120]}")
+            return False
+        except PlaywrightError as error:
+            # Message Playwright verbatim : seul le type sort.
             logger.info(f"verify_reselect_retry error={type(error).__name__}")
             return False
 
-    def _log_verify_failure(self, app_page: ApplicationPage, before: int, after: int, reselected: int) -> None:
-        """Journalise la FORME du tableau, jamais son texte : les lignes portent des données personnelles.
+    def _log_verify_failure(
+        self, app_page: ApplicationPage, before: int, after: int, attempts: int, succeeded: int
+    ) -> None:
+        """Journalise la FORME du tableau, et le libellé des candidatures — jamais celui des événements.
 
-        Ces compteurs suffisent à trancher sans trace : `table_missing` désigne une page qui
-        n'est plus la bonne, `target_not_found` une candidature que le bot ne reconnaît plus
-        (des événements existent mais aucun ne lui est rattaché), `count_unchanged` une écriture
-        qui n'est réellement pas arrivée dans l'historique.
+        Une ligne de candidature porte « Réponse à offre <intitulé> ( réf. … ) » : de la donnée
+        d'offre, publique. Une ligne d'événement porte son type et son auteur, donc une personne :
+        elle ne sort pas d'ici.
+
+        `reason` ne se déduit que de ce qui a réellement été mesuré. `target_not_found` exige
+        d'avoir pu lire : sans cela on dirait `unreadable`, et non une cause inventée.
         """
         shape = app_page.history_shape()
         if not shape.get("table"):
             reason = "table_missing"
+        elif succeeded == 0:
+            reason = "reselect_failed"
         elif after == 0 and shape.get("events"):
             reason = "target_not_found"
         else:
@@ -824,8 +845,11 @@ class TalentsoftBot:
             f"applications={shape.get('applications', 0)} events={shape.get('events', 0)} "
             f"other={shape.get('other', 0)} "
             f"selected_line={str(bool(shape.get('selected_line'))).lower()} "
-            f"reselected={reselected}"
+            f"reselect_attempts={attempts} reselect_ok={succeeded}"
         )
+        if reason in ("reselect_failed", "target_not_found"):
+            labels = [text[:90] for text in app_page.application_row_texts()[:4]]
+            logger.warning(f"verify_failed_applications labels={labels!r}")
 
     def add_documents(
         self,
