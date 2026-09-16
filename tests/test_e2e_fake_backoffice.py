@@ -256,6 +256,61 @@ def test_event_lands_on_the_selected_application_only(bot):
     assert app_page.list_events("23770") == []
 
 
+def test_fake_back_office_folds_the_list_after_a_mutation_postback(bot):
+    """Garde sur le fixture lui-meme.
+
+    Le vrai Back Office replie l historique et retire `tr.selectedLine` apres un postback de
+    mutation. Tant que le faux ne le reproduisait pas, il etait plus complaisant que le vrai et
+    aucun test ne pouvait attraper une relecture faite dans le mauvais etat de page.
+    """
+    bot.open_application("candidat@example.com", "25152")
+    assert bot.page.locator("tr.selectedLine").count() == 1
+    assert bot.page.locator("tr.trChildrenEvent").count() > 0
+
+    bot.page.evaluate("() => window.__addEvent('Candidature reactivee', '14/09/2026', 'x')")
+    bot.page.wait_for_timeout(300)
+
+    assert bot.page.locator("tr.selectedLine").count() == 0, "la marque de selection doit disparaitre"
+    assert bot.page.locator("tr.trChildrenEvent").count() == 0, "la liste doit se replier"
+
+
+def test_event_is_verified_despite_the_fold_caused_by_its_own_postback(bot):
+    """La regression observee en recette : evenement bien cree, mais rendu `unverified`.
+
+    Le compte de reference est pris candidature DEPLIEE ; le postback de validation la replie.
+    Relire sans reselectionner compare deux etats differents de la page.
+    """
+    app_page, _ = bot.open_application("candidat@example.com", "25152")
+    before = len(app_page.list_events("25152"))
+
+    result = bot.add_event(app_page, "25152", "En attente", "Synthese Hippolyte.ai", "2026-09-14")
+
+    assert result["ok"] is True, result
+    assert result["verified"] is True
+    assert len(app_page.list_events("25152")) == before + 1
+
+
+def test_event_text_does_not_depend_on_the_row_being_displayed(bot):
+    """Une ligne repliee doit rendre le meme texte qu une ligne affichee.
+
+    `innerText` ne le garantit pas : la spec HTML le fait retomber sur `textContent` pour un
+    element non rendu, donc une ligne visible rend « Type<TAB>Date » et la meme ligne repliee
+    « TypeDate ». Tout ce qui s appuie dessus — reference d offre, signature d evenement —
+    deviendrait dependant du rendu.
+    """
+    app_page, _ = bot.open_application("candidat@example.com", "25152")
+    displayed = app_page.list_events("25152")
+    assert displayed, "il faut au moins une ligne d evenement pour que le test prouve quelque chose"
+
+    bot.page.evaluate(
+        "() => Array.from(document.querySelectorAll('tr.trChildrenEvent'))"
+        "        .forEach(r => { r.style.display = 'none'; })"
+    )
+    folded = app_page.list_events("25152")
+
+    assert folded == displayed
+
+
 def test_comment_longer_than_field_is_refused_without_mutating(bot):
     """Le champ tronquerait silencieusement : on refuse avant d'écrire."""
     app_page, _ = bot.open_application("candidat@example.com", "25152")

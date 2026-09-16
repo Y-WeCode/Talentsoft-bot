@@ -64,6 +64,23 @@ dans l'api pendant que le worker tenait son propre navigateur.
   appelait `login()` au lieu de `ensure_logged_in()`. Un échec de reprise laisse maintenant la
   seconde passe conclure à `SessionExpired`, diagnostic exact, plutôt qu'une erreur de login qui
   désignerait à tort les identifiants.
+- **Un événement créé était rendu `unverified`.** Le compte de référence est pris candidature
+  dépliée ; le postback de validation la replie et retire `tr.selectedLine`. La relecture
+  comparait donc deux états différents de la page, et concluait à un échec alors que l'écriture
+  avait abouti — côté Hippolyte.ai, un `INDETERMINATE` et une revue humaine pour rien.
+  `_verify_event_added` resélectionne désormais la candidature avant de compter, au plus deux
+  fois dans son budget de 15 s, en tolérant les échecs transitoires du postback. Les deux
+  conditions de vérification (compte **et** signature) sont conservées : la signature seule
+  laisserait un événement préexistant de même type et même date valider une écriture absente.
+- **Le texte d'une ligne d'historique ne dépend plus de son affichage.** `_history_rows` lisait
+  `innerText`, que la spec HTML fait retomber sur `textContent` pour un élément non rendu : une
+  ligne visible rendait « Type<TAB>Date », la même ligne repliée « TypeDate ». La référence
+  d'offre et la signature d'événement devenaient dépendantes du rendu. La lecture se fait
+  maintenant cellule par cellule, avec un résultat identique dans les deux états.
+- Nouveau `WARNING verify_failed` en cas d'échec de relecture, avec la **forme** du tableau
+  (compteurs par type de ligne, présence de `selectedLine`) et jamais son texte, qui porte des
+  données personnelles. Le `reason=` distingue `table_missing`, `target_not_found` et
+  `count_unchanged` sans qu'il faille ouvrir une trace.
 
 - `mutation_started` n'est plus posé au lancement du job mais à la **première écriture réelle**, via un
   callback `on_mutation_started` appelé par le scraper juste avant la première soumission. Un job qui

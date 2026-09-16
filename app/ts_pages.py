@@ -711,25 +711,75 @@ class ApplicationPage:
             return None
 
     def _history_rows(self) -> list[tuple[str, str]]:
-        """Lignes du tableau d'historique, dans l'ordre du DOM : ('application'|'event', texte)."""
+        """Lignes du tableau d'historique, dans l'ordre du DOM : ('application'|'event', texte).
+
+        Le texte est assemblé **cellule par cellule**, et non lu via `innerText`. Celui-ci rend
+        un résultat différent selon que la ligne est affichée ou non : la spec HTML le fait
+        retomber sur `textContent` pour un élément non rendu, si bien qu'une ligne visible rend
+        « Type<TAB>Date » et la même ligne repliée « TypeDate ». Or les lignes d'événement sont
+        repliées dès qu'aucune candidature n'est sélectionnée — et après un postback de mutation.
+        Tout ce qui s'appuie sur ce texte (référence d'offre, signature d'événement) deviendrait
+        alors dépendant du rendu.
+        """
         try:
             return self.page.evaluate(
-                """() => {
-                    const table = document.querySelector('table.events-history-table')
-                        || document.querySelector('table.result-grid-view');
+                """(selectors) => {
+                    const table = selectors.map(s => document.querySelector(s)).find(Boolean);
                     if (!table) return [];
                     return Array.from(table.rows).map(r => {
                         const cls = r.className || '';
                         const kind = cls.includes('trChildrenEvent') ? 'event'
                             : cls.includes('ch_content_outerrep') || cls.includes('selectedLine') ? 'application'
                             : 'other';
-                        return [kind, (r.innerText || '').replace(/\\s+/g, ' ').trim()];
+                        const text = Array.from(r.cells)
+                            .map(c => (c.textContent || '').replace(/\\s+/g, ' ').trim())
+                            .filter(Boolean)
+                            .join(' ');
+                        return [kind, text];
                     }).filter(r => r[0] !== 'other');
-                }"""
+                }""",
+                list(sel.APPLICATIONS_HISTORY_TABLE),
             )
         except Exception as error:
             logger.debug(f"history_rows_failed error={type(error).__name__}")
             return []
+
+    def history_shape(self) -> dict:
+        """Forme du tableau d'historique — des compteurs, **jamais** de texte de ligne.
+
+        Sert à diagnostiquer un échec de vérification sans ouvrir de trace : les compteurs
+        suffisent à distinguer « les lignes ont disparu » de « la candidature cible n'est plus
+        reconnue ». Le texte des lignes porte des données personnelles et n'a rien à faire
+        dans un log.
+        """
+        empty = {"table": False, "applications": 0, "events": 0, "other": 0, "selected_line": False}
+        try:
+            return self.page.evaluate(
+                """(selectors) => {
+                    const table = selectors.map(s => document.querySelector(s)).find(Boolean);
+                    if (!table) {
+                        return {table: false, applications: 0, events: 0, other: 0, selected_line: false};
+                    }
+                    let applications = 0, events = 0, other = 0;
+                    for (const r of Array.from(table.rows)) {
+                        const cls = r.className || '';
+                        if (cls.includes('trChildrenEvent')) events++;
+                        else if (cls.includes('ch_content_outerrep') || cls.includes('selectedLine')) applications++;
+                        else other++;
+                    }
+                    return {
+                        table: true,
+                        applications: applications,
+                        events: events,
+                        other: other,
+                        selected_line: !!table.querySelector('tr.selectedLine'),
+                    };
+                }""",
+                list(sel.APPLICATIONS_HISTORY_TABLE),
+            )
+        except Exception as error:
+            logger.debug(f"history_shape_failed error={type(error).__name__}")
+            return empty
 
     def list_events(self, offer_id: str | None = None) -> list[str]:
         """Événements de la candidature développée (ou de toutes si `offer_id` est absent)."""

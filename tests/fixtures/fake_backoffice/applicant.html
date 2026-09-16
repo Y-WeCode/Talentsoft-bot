@@ -165,7 +165,21 @@ window.__closeModal = function () {
 window.__addEvent = function (type, dateStr, comment) {
   if (selectedOffer) EVENTS[selectedOffer].push({type: type, date: dateStr, by: 'Recruteur Test'});
   window.__closeModal();
-  setTimeout(renderEvents, 60);
+  // Postback de MUTATION : la liste se REPLIE et la candidature perd sa marque de selection.
+  // C'est ce que decrit app/ts_selectors.py (« selectedLine ... absent au chargement de la
+  // fiche ET apres un postback de mutation »). Sans ce repliement, ce faux Back Office etait
+  // plus complaisant que le vrai et laissait passer les regressions de verification.
+  //
+  // Modele conservateur : on retire les lignes du DOM. Le DOM exact du tenant apres postback
+  // n'a pas ete releve — il se peut qu'elles y restent en display:none. Le bot doit tenir dans
+  // les deux cas, d'ou la reselection avant relecture plutot qu'une lecture plus permissive.
+  setTimeout(function () {
+    selectedOffer = null;
+    renderEvents();
+    Array.from(document.querySelectorAll('tr.selectedLine')).forEach(function (r) {
+      r.className = 'ch_content_outerrep';
+    });
+  }, 60);
 };
 
 window.__addAttachment = function (category, filename) {
