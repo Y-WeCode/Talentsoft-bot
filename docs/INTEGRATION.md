@@ -238,8 +238,17 @@ réponse, et il n'apparaît pas non plus dans les logs du bot.
 | `ok: false, error: "comment_too_long"` | Commentaire > 2000 caractères. Rien n'a été écrit | Raccourcir et rejouer |
 | `ok: false, error: "multiple_documents_same_category"` | Plusieurs fichiers pour une catégorie | Un appel par document |
 | `ok: false, error: "event_type_required"` | Aucun type fourni et aucun défaut configuré | Corriger l'appel ou la configuration du bot |
-| `ok: false, error: "event_failed"` / `"upload_failed"` | Échec avant le clic de validation | Rejeu possible |
+| `ok: false, error: "event_failed"` / `"upload_failed"` | Échec **avant** le clic de validation. Rien n'a été écrit | Rejeu possible |
 | `ok: false, error: "unverified", mutation_may_have_happened: true` | Clic effectué, relecture non confirmée | **Statut indéterminé** : relire l'historique avant tout rejeu |
+
+> **Cette distinction est garantie par le code**, et vérifiée par des tests. Une interruption
+> survenue *après* le clic ne rend jamais `event_failed` ni `upload_failed` — elle rend
+> `unverified` avec `mutation_may_have_happened: true`. Vous pouvez donc rejouer un
+> `event_failed` sans le vérifier au préalable.
+>
+> Une **perte du navigateur** en cours de job ne se présente plus comme un échec d'action : le
+> job entier passe `failed` avec `error_code: browser_fatal`. C'est une panne d'infrastructure,
+> pas un refus métier — et `mutation_started` vous dira s'il faut vérifier avant de rejouer.
 
 ### `verification: "weak"`
 

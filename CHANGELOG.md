@@ -51,6 +51,27 @@ dans l'api pendant que le worker tenait son propre navigateur.
 
 ### Fiabilité
 
+- **`mutation_started` pouvait mentir, et disait « rien n'a été écrit » après un clic parti.**
+  Le gestionnaire d'exception de `update_application` remplaçait le dictionnaire d'action, effaçant
+  l'état accumulé par `add_event` — dont son propre `mutation_started`. Un job revenait alors avec
+  deux réponses contradictoires : `update_details.mutation_started: false` et, au niveau du job,
+  `mutation_started: true`. L'appelant pouvait en conclure qu'un rejeu était sûr alors qu'une
+  écriture était peut-être partie. Les deux champs dérivent désormais de la même source.
+- **`event_failed` et `upload_failed` tiennent enfin leur promesse.** La documentation garantit
+  qu'ils signalent un échec **avant** le clic de validation, donc rejouable ; le code les rendait
+  aussi après. Une interruption postérieure au clic rend maintenant `unverified` avec
+  `mutation_may_have_happened: true`.
+- **Un navigateur perdu est reconnu par son type, pas par le texte de son message.** Un
+  `TargetClosedError` dont le libellé ne correspondait à aucun fragment connu était traité comme
+  un échec métier ordinaire, sans invalider la session. Le job passe désormais `failed` avec
+  `error_code: browser_fatal` — **changement visible pour l'intégrateur**.
+- Un dépôt de pièce jointe non confirmé journalise enfin quelque chose : `verify_failed
+  kind=attachment` avec la catégorie visée et le nombre de pièces jointes lues. Il posait
+  jusqu'ici `unverified` sans la moindre trace.
+- `BROWSER_SESSION_IDLE_TTL_SECONDS` porté à 7200 dans `.env.example` : à 1800, une cadence de
+  pushs horaires faisait expirer la session entre chaque appel, et le bot se reconnectait presque
+  à chaque job. Chaque login est une occasion d'échouer.
+
 - **Reprise d'une session restaurée qui atterrit hors du Back Office.** Au démarrage à froid avec
   un `storage_state` encore valide côté fournisseur d'identité mais dont la session applicative du
   Back Office a expiré, le tenant renvoie la racine du BO vers l'espace collaborateur.

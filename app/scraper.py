@@ -61,6 +61,13 @@ from .ts_pages import (
 
 logger = logging.getLogger(__name__)
 
+# Types d'exception sans ambiguite : le navigateur est perdu, quel que soit le libelle.
+# Compare sur le nom de classe car `TargetClosedError` n'est pas exporte par
+# `playwright.sync_api` ; l'importer depuis `playwright._impl._errors` creerait une dependance
+# a une API privee. Constate en recette : un TargetClosedError dont le message ne matchait aucun
+# fragment a ete traite comme un echec metier ordinaire, sans invalider la session.
+_FATAL_ERROR_TYPES = ("TargetClosedError",)
+
 _FATAL_FRAGMENTS = (
     "target closed",
     "has been closed",
@@ -94,7 +101,11 @@ class SessionExpired(Exception):
 
 def is_fatal_playwright_error(error: BaseException) -> bool:
     message = str(error).lower()
-    return isinstance(error, PlaywrightError) and any(fragment in message for fragment in _FATAL_FRAGMENTS)
+    if not isinstance(error, PlaywrightError):
+        return False
+    if type(error).__name__ in _FATAL_ERROR_TYPES:
+        return True
+    return any(fragment in message for fragment in _FATAL_FRAGMENTS)
 
 
 def _event_signature(event_type: str | None, event_date: str | None) -> str:
@@ -682,19 +693,53 @@ class TalentsoftBot:
         return app_page, label
 
     def _notify_mutation_started(self) -> None:
-        """Signale la première écriture réelle, une seule fois par job.
+        """Enregistre la première écriture réelle, et le signale à l'appelant s'il l'a demandé.
+
+        Le drapeau est posé **avant** et **indépendamment** du callback : sans cela, en mode
+        mono-processus — où aucun callback n'est fourni — le bot ne saurait plus lui-même qu'il
+        a écrit, et `update_details.mutation_started` se contredirait avec le job.
 
         Un échec de notification ne doit pas faire échouer une mutation déjà engagée : on
         journalise et on poursuit. Le pire cas est un job rejouable à tort, que l'idempotence
         côté appelant rattrape.
         """
-        if self._mutation_notified or self._mutation_callback is None:
+        if self._mutation_notified:
             return
         self._mutation_notified = True
+        if self._mutation_callback is None:
+            return
         try:
             self._mutation_callback()
         except Exception as error:
             logger.warning(f"mutation_started_callback_failed error={type(error).__name__}")
+
+    def _aborted_action(self, before_click_error: str, **fields) -> dict:
+        """Action interrompue avant d'avoir pu accumuler son propre état.
+
+        Le drapeau est repris de `_mutation_notified`, seule source fiable à cet instant : le
+        dictionnaire de l'action, lui, est resté dans la fonction qui a levé.
+        """
+        item: dict = dict(fields)
+        if self._mutation_notified:
+            item["mutation_started"] = True
+        self._failure_after_click(item, before_click_error)
+        return item
+
+    def _failure_after_click(self, item: dict, before_click_error: str) -> None:
+        """Pose l'erreur d'une action interrompue, selon qu'une écriture a été engagée ou non.
+
+        `event_failed` et `upload_failed` promettent à l'appelant, par contrat documenté, que
+        l'échec est survenu **avant** le clic de validation et que le rejeu est donc sûr
+        (docs/INTEGRATION.md). Les rendre après un clic déjà parti invite au doublon : c'est
+        exactement ce qui s'est produit en recette. Après le clic, le vocabulaire correct est
+        celui de l'incertitude, qui existe déjà.
+        """
+        item["ok"] = False
+        if item.get("mutation_started"):
+            item.setdefault("error", "unverified")
+            item["mutation_may_have_happened"] = True
+        else:
+            item.setdefault("error", before_click_error)
 
     # --- Actions -----------------------------------------------------------------------
 
@@ -739,14 +784,27 @@ class TalentsoftBot:
             return result
 
         result["event_type"] = chosen or event_type
-        result["mutation_started"] = True
-        self._notify_mutation_started()
-        dialog.submit(frame)
+        try:
+            result["mutation_started"] = True
+            self._notify_mutation_started()
+            dialog.submit(frame)
 
-        if self._verify_event_added(app_page, offer_id, signature, before):
-            result.update({"ok": True, "verified": True, "verification": "weak"})
-        else:
-            result.update({"ok": False, "error": "unverified", "mutation_may_have_happened": True})
+            if self._verify_event_added(app_page, offer_id, signature, before):
+                result.update({"ok": True, "verified": True, "verification": "weak"})
+            else:
+                result.update({"ok": False, "error": "unverified", "mutation_may_have_happened": True})
+        except (SelectorNotFound, JobTimeout) as error:
+            # On rend `result`, et non un dictionnaire neuf : il porte `mutation_started`, la
+            # seule information qui dise à l'appelant s'il peut rejouer.
+            logger.error(f"event_failed error={type(error).__name__}")
+            self.screenshot("event_failed")
+            self._failure_after_click(result, "event_failed")
+        except PlaywrightError as error:
+            if is_fatal_playwright_error(error):
+                raise BrowserFatalError(str(error)) from error
+            logger.error(f"event_failed error={type(error).__name__}")
+            self.screenshot("event_failed")
+            self._failure_after_click(result, "event_failed")
         return result
 
     # Nombre de TENTATIVES de resélection, abouties ou non. Le repliement provoqué par le
@@ -851,6 +909,21 @@ class TalentsoftBot:
             labels = [text[:90] for text in app_page.application_row_texts()[:4]]
             logger.warning(f"verify_failed_applications labels={labels!r}")
 
+    def _log_attachment_verify_failure(self, app_page: ApplicationPage, category: str) -> None:
+        """Un dépôt non confirmé ne doit pas passer inaperçu.
+
+        Jusqu'ici ce cas posait `unverified` sans la moindre trace : le jour où il survenait, le
+        diagnostic partait de zéro. La catégorie est un libellé de référentiel et le compte de
+        pièces jointes une mesure : aucun nom de fichier d'origine ne sort d'ici.
+        """
+        try:
+            count = len(app_page.list_attachments())
+        except Exception as error:
+            logger.warning(f"verify_failed kind=attachment reason=unreadable error={type(error).__name__}")
+            return
+        reason = "list_empty" if count == 0 else "name_not_found"
+        logger.warning(f"verify_failed kind=attachment reason={reason} attachments={count} category={category!r}")
+
     def add_documents(
         self,
         app_page: ApplicationPage,
@@ -925,18 +998,17 @@ class TalentsoftBot:
             if self._verify_attachment_present(app_page, display_name, item["category"]):
                 item.update({"ok": True, "verified": True})
             else:
+                self._log_attachment_verify_failure(app_page, item["category"])
                 item.update({"ok": False, "error": "unverified", "mutation_may_have_happened": True})
         except (SelectorNotFound, JobTimeout) as error:
             logger.error(f"document_failed error={type(error).__name__}")
-            item.setdefault("error", "upload_failed")
-            item["ok"] = False
+            self._failure_after_click(item, "upload_failed")
             self.screenshot("document_failed")
         except PlaywrightError as error:
             if is_fatal_playwright_error(error):
                 raise BrowserFatalError(str(error)) from error
             logger.error(f"document_failed error={type(error).__name__}")
-            item.setdefault("error", "upload_failed")
-            item["ok"] = False
+            self._failure_after_click(item, "upload_failed")
             self.screenshot("document_failed")
         return [item]
 
@@ -994,15 +1066,17 @@ class TalentsoftBot:
                 try:
                     actions["event"] = self.add_event(app_page, offer_id, effective_type, comment, effective_date)
                 except (SelectorNotFound, JobTimeout) as error:
+                    # Filet de sécurité : `add_event` traite désormais ses propres exceptions et
+                    # rend son état accumulé. On n'arrive ici que si l'échec précède ce traitement.
                     logger.error(f"event_failed error={type(error).__name__}")
                     self.screenshot("event_failed")
-                    actions["event"] = {"ok": False, "error": "event_failed", "event_type": effective_type}
+                    actions["event"] = self._aborted_action("event_failed", event_type=effective_type)
                 except PlaywrightError as error:
                     if is_fatal_playwright_error(error):
                         raise BrowserFatalError(str(error)) from error
                     logger.error(f"event_failed error={type(error).__name__}")
                     self.screenshot("event_failed")
-                    actions["event"] = {"ok": False, "error": "event_failed", "event_type": effective_type}
+                    actions["event"] = self._aborted_action("event_failed", event_type=effective_type)
                 mutation_started = mutation_started or bool(actions["event"].get("mutation_started"))
 
             if document_paths:
@@ -1016,7 +1090,10 @@ class TalentsoftBot:
                 "offer_id": offer_id,
                 "application_label": label,
                 "updated_at": datetime.now().isoformat(timespec="seconds"),
-                "mutation_started": mutation_started,
+                # Même source que le drapeau du job : les deux ne peuvent plus se contredire.
+                # Ils l'ont fait en recette (job 7edd00fb), et l'appelant y lisait « rien n'a
+                # été écrit » alors qu'un clic de validation était parti.
+                "mutation_started": mutation_started or self._mutation_notified,
                 "actions": actions,
             }
         except Exception:
