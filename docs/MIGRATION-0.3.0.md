@@ -2,9 +2,10 @@
 
 Destinataire : l'équipe qui intègre Talentsoft-bot dans Hippolyte.ai.
 
-**Un seul changement oblige à toucher au code : un `202` peut désormais répondre à un appel
-synchrone.** Tout le reste est additif — le contrat d'une réponse `200` est strictement inchangé,
-aucun champ n'a disparu, aucune route n'a bougé.
+**Deux changements obligent à toucher au code** : un `202` peut désormais répondre à un appel
+synchrone (§1), et une perte de navigateur rend un job `failed` sans `update_details` (§7). Tout le
+reste est additif — le contrat d'une réponse `200` est strictement inchangé, aucun champ n'a
+disparu, aucune route n'a bougé.
 
 Si votre client traite déjà `?async=1`, l'essentiel du travail est fait : il s'agit d'appliquer le
 même traitement aux appels synchrones.
@@ -24,7 +25,7 @@ temps, et `202` sinon.
 
 ---
 
-## 1. Traiter le `202` — le seul changement obligatoire
+## 1. Traiter le `202` — premier changement obligatoire
 
 ### Avant
 
@@ -214,6 +215,89 @@ Hippolyte.ai.
 
 ---
 
+## 7. Une perte de navigateur devient un job en échec
+
+**C'est la seule autre modification qui vous impose du code.**
+
+Jusqu'ici, un navigateur perdu en cours de traitement se présentait comme deux échecs d'action
+distincts et le job restait `completed` :
+
+```json
+{ "status": "completed",
+  "result": { "success": false,
+              "update_details": { "actions": {
+                  "event":     { "ok": false, "error": "event_failed" },
+                  "documents": [ { "ok": false, "error": "upload_failed" } ] } } } }
+```
+
+C'était trompeur : rien là-dedans ne dit qu'il s'agit d'une panne d'infrastructure, et `event_failed`
+promet un rejeu sûr — parfois à tort. Désormais :
+
+```json
+{ "status": "failed",
+  "error_code": "browser_fatal",
+  "result": null,
+  "mutation_started": true }
+```
+
+> **Votre affichage d'erreur doit accepter un job sans `update_details`.** Sur un job `failed`,
+> `result` vaut `null` : tout code qui lit `result.update_details.actions` sans le vérifier lèvera.
+> C'est le seul vrai piège de ce changement.
+
+En mode synchrone, cela se traduit par un `500` là où vous receviez un `200` avec
+`success: false`. Votre `catch` traite déjà le `500` en `INDETERMINATE` — ce qui est la bonne
+conclusion, puisque `mutation_started` peut être vrai.
+
+---
+
+## 8. `event_failed` et `upload_failed` tiennent enfin leur promesse
+
+Le tableau des résultats par action affirme que ces deux codes signalent un échec **avant** le clic
+de validation, donc un rejeu sûr. Le bot les rendait aussi **après** le clic : un rejeu pouvait
+alors créer un doublon.
+
+C'est corrigé, et vérifié par des tests. La règle est maintenant garantie :
+
+| Ce que vous recevez | Ce que ça veut dire | Ce que vous pouvez faire |
+| --- | --- | --- |
+| `error: "event_failed"` / `"upload_failed"` | Rien n'a été écrit | **Rejouer directement**, sans vérification |
+| `error: "unverified"` + `mutation_may_have_happened: true` | Le clic est parti, le résultat est inconnu | `INDETERMINATE`, vérifier avant tout rejeu |
+
+Concrètement : vous pouvez cesser d'envoyer les `event_failed` en revue humaine.
+
+**Et le rejeu fonctionne réellement** : un appel qui échoue sans avoir rien écrit libère sa clé
+d'idempotence. Auparavant le résultat était mémorisé dans tous les cas, si bien qu'un rejeu sous
+la même clé rendait l'échec précédent sans rien réexécuter — la promesse ci-dessus était un
+no-op pendant 24 h.
+
+> **Si vous avez contourné le problème en salant la clé** (`<clé>:r1`, `:r2`…), sa sûreté dépend
+> de la version déployée. Saler revient à contourner la protection anti-doublon : ce n'est
+> légitime **que** si `event_failed` garantit qu'aucune écriture n'a eu lieu — garantie apportée
+> par le correctif §8 ci-dessus. Contre une version antérieure, le même code pouvait être rendu
+> après le clic de validation, et un rejeu salé créait alors un doublon.
+>
+> Vérifiez la version réellement déployée avant de vous y fier :
+>
+> ```bash
+> docker exec talentsoft_bot_worker grep -c "_failure_after_click" /app/app/scraper.py
+> ```
+>
+> `1` ou plus : la garantie est en place, le salage est sûr — et devient inutile, la clé étant
+> désormais libérée d'elle-même. `0` : retirez le salage, ou n'appliquez pas la promesse de rejeu
+> direct tant que la version n'est pas déployée.
+
+---
+
+## 9. Les deux `mutation_started` ne se contredisent plus
+
+Un job pouvait rendre `update_details.mutation_started: false` — « rien n'a été écrit » — alors que
+le champ `mutation_started` du job valait `true`. Les deux dérivent désormais de la même source.
+
+**Fiez-vous au `mutation_started` de premier niveau** : c'est celui qui fait foi, et le seul présent
+sur un job `failed`, où `update_details` n'existe pas.
+
+---
+
 ## Ce qui n'a **pas** changé
 
 Pour éviter une relecture inutile de votre côté :
@@ -242,6 +326,12 @@ Pour éviter une relecture inutile de votre côté :
 - [ ] Supervision de `worker.alive` et de `login_count` sur `GET /`.
 - [ ] Timeout HTTP client **supérieur** à `SYNC_WAIT_TIMEOUT_SECONDS` côté bot (120 s par défaut),
       pour recevoir le `202` plutôt qu'une coupure.
+- [ ] L'affichage d'erreur accepte un job `failed` **sans** `update_details` (`result: null`).
+- [ ] `error_code: "browser_fatal"` est traité comme une panne d'infrastructure, pas comme un refus
+      métier.
+- [ ] Les `event_failed` / `upload_failed` ne partent plus en revue humaine : ils sont rejouables
+      directement.
+- [ ] Le `mutation_started` lu est celui de **premier niveau**, pas celui de `update_details`.
 
 ---
 

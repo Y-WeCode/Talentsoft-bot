@@ -185,7 +185,7 @@ def _process_job(job: dict) -> None:
         job["result"] = _dispatch(job, payload)
         job["status"] = "completed"
         if is_mutation and job.get("idempotency_key"):
-            idempotency.store_result(job["idempotency_key"], job["result"])
+            _remember_or_release(job)
         jobs.save_job(job)
         logger.info(f"job_id={job_id} status=completed")
     except browser_runner.BrowserJobError as error:
@@ -200,6 +200,25 @@ def _process_job(job: dict) -> None:
     finally:
         _set_current_job(None)
         _cleanup_documents(payload.get("document_paths") or [])
+
+
+def _remember_or_release(job: dict) -> None:
+    """Mémorise le résultat, sauf si l'échec est rejouable tel quel.
+
+    Un job peut atteindre `completed` avec `success: false` sans avoir rien écrit — un type
+    d'événement introuvable, par exemple. Mémoriser ce résultat rendait la clé inutilisable
+    pendant 24 h : l'appelant qui suivait la documentation croyait rejouer et recevait le même
+    échec, sans qu'aucun travail ne soit refait.
+    """
+    key = job["idempotency_key"]
+    if job.get("mutation_started"):
+        idempotency.store_result(key, job["result"])
+        return
+    if safety.is_replayable_failure(job.get("result")):
+        idempotency.release(key)
+        logger.info(f"job_id={job['id']} idempotency_released=true reason=replayable_failure")
+        return
+    idempotency.store_result(key, job["result"])
 
 
 def _release_idempotency(job: dict) -> None:

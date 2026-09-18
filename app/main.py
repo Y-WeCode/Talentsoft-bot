@@ -395,7 +395,12 @@ async def _run_mutation_in_api(*, job_type: str, key: str, work: Callable[[objec
     except Exception:
         idempotency.release(key)
         raise
-    idempotency.store_result(key, payload)
+    if safety.is_replayable_failure(payload):
+        # Rien n'a été écrit : mémoriser interdirait le rejeu que la documentation promet.
+        idempotency.release(key)
+        logger.info(f"job_type={job_type} idempotency_released=true reason=replayable_failure")
+    else:
+        idempotency.store_result(key, payload)
     return JSONResponse(content=payload, status_code=200)
 
 
