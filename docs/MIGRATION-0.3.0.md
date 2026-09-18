@@ -265,6 +265,15 @@ C'est corrigé, et vérifié par des tests. La règle est maintenant garantie :
 
 Concrètement : vous pouvez cesser d'envoyer les `event_failed` en revue humaine.
 
+**Et le rejeu fonctionne réellement** : un appel qui échoue sans avoir rien écrit libère sa clé
+d'idempotence. Auparavant le résultat était mémorisé dans tous les cas, si bien qu'un rejeu sous
+la même clé rendait l'échec précédent sans rien réexécuter — la promesse ci-dessus était un
+no-op pendant 24 h.
+
+Si vous aviez contourné le problème en salant la clé (`<clé>:r1`, `:r2`…), ce contournement reste
+sans danger : une clé fournie l'emporte toujours sur la clé dérivée du contenu. Vous pouvez le
+retirer à votre rythme.
+
 ---
 
 ## 9. Les deux `mutation_started` ne se contredisent plus

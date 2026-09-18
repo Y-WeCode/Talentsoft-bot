@@ -321,6 +321,15 @@ la clé et renvoie le `job_id` déjà en cours, avec un nouveau `202`.
 Un second appel portant la même `idempotency_key` — ou le même contenu — dans les 24 h renvoie le résultat
 mémorisé avec l'en-tête `X-Idempotent-Replay: true`, sans toucher au Back Office.
 
+> **Seul est mémorisé ce qui n'est pas rejouable.** Un appel qui échoue **sans avoir rien écrit**
+> libère sa clé : le rejeu sous la même clé refait réellement le travail, au lieu de vous rendre
+> l'échec précédent. C'est ce qui rend tenable la promesse du tableau des résultats par action —
+> un `event_failed` ou un `upload_failed` se rejoue directement.
+>
+> Dès qu'une écriture a été engagée, la clé reste prise, y compris quand le succès global est
+> faux : un événement écrit et un document en échec ne se rejouent pas, sous peine de créer un
+> doublon de l'événement.
+
 > **Fournissez systématiquement une `idempotency_key`.**
 >
 > Le bot **ne peut pas** détecter qu'un événement est déjà présent : le Back Office n'affiche pas le

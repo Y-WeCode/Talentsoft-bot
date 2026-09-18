@@ -51,6 +51,13 @@ dans l'api pendant que le worker tenait son propre navigateur.
 
 ### Fiabilité
 
+- **Un échec sans écriture libère sa clé d'idempotence** (issue #17). Le résultat d'un job
+  `completed` était mémorisé même quand `success` valait `false` : un `event_failed` ou un
+  `upload_failed` rendait donc l'échec précédent au rejeu, sans rien réexécuter, pendant tout le
+  TTL. La documentation promettait pourtant un rejeu direct — la promesse est désormais tenue.
+  La garde reste `mutation_started` : dès qu'une écriture a été engagée, la clé demeure prise,
+  y compris sur un succès partiel, faute de quoi le rejeu créerait un doublon.
+
 - **`mutation_started` pouvait mentir, et disait « rien n'a été écrit » après un clic parti.**
   Le gestionnaire d'exception de `update_application` remplaçait le dictionnaire d'action, effaçant
   l'état accumulé par `add_event` — dont son propre `mutation_started`. Un job revenait alors avec

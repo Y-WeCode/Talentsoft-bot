@@ -177,3 +177,68 @@ def test_unverified_action_is_reported_as_possibly_mutated(ts):
     assert done["status"] == "completed"
     assert done["result"]["success"] is False
     assert done["mutation_may_have_happened"] is True
+
+
+# --- Idempotence d'un echec rejouable (issue #17) --------------------------------------------
+#
+# La note de migration garantit qu'un `event_failed` / `upload_failed` est rejouable en l'etat.
+# Memoriser le resultat d'un job `completed` mais infructueux neutralisait cette promesse : la
+# re-soumission rendait le resultat memorise, sans rien reexecuter, pendant tout le TTL.
+
+
+def test_a_failure_without_any_write_stays_replayable(ts):
+    """La reproduction de l'issue : deuxieme soumission, meme cle, le travail doit repartir."""
+    # `event_failed` garantit qu'aucune ecriture n'a ete engagee : le payload le dit aussi.
+    ts.install(FakeBot(actions={"event": {"ok": False, "error": "event_failed"}}, mutation_started=False))
+    done = pump_worker(ts.push(key="k-rejouable")["id"])
+
+    assert done["status"] == "completed"
+    assert done["result"]["success"] is False
+    # La cle est libre : un second appel refera le travail au lieu de rendre cet echec.
+    assert ts.idempotency.reserve("k-rejouable")[0] == "reserved"
+
+
+def test_a_successful_job_is_still_memorised(ts):
+    """L'idempotence garde tout son role sur ce qui a abouti."""
+    ts.install(FakeBot())
+    done = pump_worker(ts.push(key="k-succes")["id"])
+
+    assert done["result"]["success"] is True
+    state, replay = ts.idempotency.reserve("k-succes")
+    assert state == "replay"
+    assert replay == done["result"]
+
+
+def test_a_partial_success_is_memorised_not_released(ts):
+    """Cas partiel : l'evenement est ecrit, le document echoue.
+
+    Le succes global est faux, mais une ecriture a bien eu lieu — liberer la cle rouvrirait la
+    porte au doublon que l'idempotence existe pour empecher.
+    """
+    ts.install(
+        FakeBot(
+            actions={
+                "event": {"ok": True, "verified": True, "mutation_started": True},
+                "documents": [{"ok": False, "error": "upload_failed"}],
+            },
+            mutation_started=True,
+        )
+    )
+    done = pump_worker(ts.push(key="k-partiel")["id"])
+
+    assert done["result"]["success"] is False
+    assert ts.idempotency.reserve("k-partiel")[0] == "replay"
+
+
+def test_an_unverified_write_is_memorised(ts):
+    """Ecriture peut-etre aboutie : surtout ne pas liberer la cle."""
+    ts.install(
+        FakeBot(
+            actions={"event": {"ok": False, "error": "unverified", "mutation_may_have_happened": True}},
+            mutation_started=True,
+        )
+    )
+    done = pump_worker(ts.push(key="k-incertain")["id"])
+
+    assert done["result"]["success"] is False
+    assert ts.idempotency.reserve("k-incertain")[0] == "replay"

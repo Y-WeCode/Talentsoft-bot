@@ -37,11 +37,12 @@ def app_module(monkeypatch, tmp_path):
 class FakeBot:
     """Double du TalentsoftBot : aucun navigateur."""
 
-    def __init__(self, actions=None):
+    def __init__(self, actions=None, mutation_started=True):
         self.closed = False
         self.update_calls = 0
         self.last_kwargs = None
         self._authenticated = True
+        self._mutation_started = mutation_started
         self._actions = actions if actions is not None else {"event": {"ok": True, "verified": True}}
 
     def is_alive(self):
@@ -61,7 +62,7 @@ class FakeBot:
             "offer_id": kwargs["offer_id"],
             "application_label": "reponse a offre ( ref. 2026-25152)",
             "updated_at": "2026-01-01T00:00:00",
-            "mutation_started": True,
+            "mutation_started": self._mutation_started,
             "actions": self._actions,
         }
 

@@ -215,6 +215,27 @@ def actions_succeeded(actions: dict) -> bool:
     return True
 
 
+def is_replayable_failure(result: dict | None) -> bool:
+    """Un échec dont **aucune écriture n'a été engagée** : le rejeu à l'identique est sûr.
+
+    Mémoriser un tel résultat sous sa clé d'idempotence neutralise le rejeu que la documentation
+    promet à l'appelant — la re-soumission rend le résultat mémorisé sans rien réexécuter,
+    pendant tout le TTL. C'est ce qui a été signalé : « rejouer directement » devenait un no-op.
+
+    `mutation_started` est la garde qui compte. Libérer la clé après une écriture engagée
+    rouvrirait la porte au doublon que l'idempotence existe précisément pour empêcher — y compris
+    dans le cas partiel, événement écrit et document en échec, où le succès global est faux mais
+    où une écriture a bien eu lieu.
+    """
+    payload = result or {}
+    if payload.get("success"):
+        return False
+    details = payload.get("update_details") or {}
+    if details.get("mutation_started"):
+        return False
+    return not actions_may_have_mutated(details.get("actions") or {})
+
+
 def actions_may_have_mutated(actions: dict) -> bool:
     """True si une écriture a pu aboutir sans avoir pu être vérifiée.
 
