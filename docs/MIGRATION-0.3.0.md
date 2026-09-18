@@ -270,9 +270,21 @@ d'idempotence. Auparavant le résultat était mémorisé dans tous les cas, si b
 la même clé rendait l'échec précédent sans rien réexécuter — la promesse ci-dessus était un
 no-op pendant 24 h.
 
-Si vous aviez contourné le problème en salant la clé (`<clé>:r1`, `:r2`…), ce contournement reste
-sans danger : une clé fournie l'emporte toujours sur la clé dérivée du contenu. Vous pouvez le
-retirer à votre rythme.
+> **Si vous avez contourné le problème en salant la clé** (`<clé>:r1`, `:r2`…), sa sûreté dépend
+> de la version déployée. Saler revient à contourner la protection anti-doublon : ce n'est
+> légitime **que** si `event_failed` garantit qu'aucune écriture n'a eu lieu — garantie apportée
+> par le correctif §8 ci-dessus. Contre une version antérieure, le même code pouvait être rendu
+> après le clic de validation, et un rejeu salé créait alors un doublon.
+>
+> Vérifiez la version réellement déployée avant de vous y fier :
+>
+> ```bash
+> docker exec talentsoft_bot_worker grep -c "_failure_after_click" /app/app/scraper.py
+> ```
+>
+> `1` ou plus : la garantie est en place, le salage est sûr — et devient inutile, la clé étant
+> désormais libérée d'elle-même. `0` : retirez le salage, ou n'appliquez pas la promesse de rejeu
+> direct tant que la version n'est pas déployée.
 
 ---
 
