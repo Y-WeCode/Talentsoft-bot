@@ -51,6 +51,22 @@ dans l'api pendant que le worker tenait son propre navigateur.
 
 ### Fiabilité
 
+- **Un pilote Playwright mort suspendait le worker indéfiniment.** Les délais d'attente de
+  Playwright sont appliqués *par son pilote Node* : quand celui-ci meurt, plus rien ne les
+  applique et l'appel Python reste suspendu sans exception ni timeout. Constaté en recette — six
+  jours sur le même job, quinze jobs empilés derrière, et un battement de cœur qui continuait
+  d'annoncer un worker en bonne santé, le thread de battement étant le seul encore vivant.
+  Ce même thread surveille désormais la durée du job : au-delà de `JOB_TIMEOUT_SECONDS + 120 s`,
+  il conclut le job en `worker_stuck` et sort, le superviseur relançant un worker neuf.
+- **Les jobs orphelins sont repris au démarrage.** Un job laissé `running` par un worker disparu
+  y restait jusqu'à l'expiration de son TTL de 24 h, et l'appelant attendait une réponse qui ne
+  viendrait jamais. Il passe maintenant en `worker_interrupted`, `mutation_started` préservé, la
+  clé d'idempotence n'étant libérée que si aucune écriture n'avait été engagée.
+- Le battement de cœur publie `current_job_seconds` : c'est son silence sur ce point qui avait
+  laissé passer le blocage.
+- `mem_limit` porté de 2 à 6 Go et `shm_size` de 1 à 2 Go. À 2 Go, le noyau tuait le renderer
+  Chromium en cours de job — deux plantages le 24/09. Une limite n'est pas une réservation.
+
 - **Un échec sans écriture libère sa clé d'idempotence** (issue #17). Le résultat d'un job
   `completed` était mémorisé même quand `success` valait `false` : un `event_failed` ou un
   `upload_failed` rendait donc l'échec précédent au rejeu, sans rien réexécuter, pendant tout le

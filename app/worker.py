@@ -22,6 +22,7 @@ import logging
 import os
 import sys
 import threading
+import time
 
 from dotenv import load_dotenv
 
@@ -37,19 +38,86 @@ from app.session_manager import session_manager  # noqa: E402
 HEARTBEAT_INTERVAL_SECONDS = 10
 
 _current_job_id: str | None = None
+_current_started_at: float | None = None
 _current_lock = threading.Lock()
 
 
 def _set_current_job(job_id: str | None) -> None:
-    global _current_job_id
+    global _current_job_id, _current_started_at
     with _current_lock:
         _current_job_id = job_id
+        _current_started_at = time.monotonic() if job_id else None
+
+
+def _current_job_age_seconds() -> tuple[str | None, int]:
+    with _current_lock:
+        job_id, started = _current_job_id, _current_started_at
+    if not job_id or started is None:
+        return None, 0
+    return job_id, int(time.monotonic() - started)
+
+
+def _hard_budget_seconds() -> int:
+    """Au-delà, le job n'est plus lent : le worker est bloqué. Marge au-dessus du budget normal."""
+    return config.job_timeout_seconds() + 120
 
 
 def _heartbeat_payload() -> dict:
-    with _current_lock:
-        current = _current_job_id
-    return {"alive": True, "pid": os.getpid(), "current_job_id": current, **session_manager.status()}
+    job_id, age = _current_job_age_seconds()
+    return {
+        "alive": True,
+        "pid": os.getpid(),
+        "current_job_id": job_id,
+        # Un battement qui dit seulement « vivant » a laissé passer six jours de blocage : le
+        # thread de battement tournait pendant que la boucle de jobs était suspendue.
+        "current_job_seconds": age,
+        **session_manager.status(),
+    }
+
+
+def _abort_if_stuck() -> None:
+    """Sort du processus quand un job dépasse toute durée plausible.
+
+    Les délais d'attente de Playwright sont appliqués **par le pilote Node**. Quand celui-ci
+    meurt — une assertion interne suffit — plus rien ne les applique : l'appel Python reste
+    suspendu sur un tuyau muet, sans exception ni timeout. Constaté en recette : six jours sur le
+    même job, quinze jobs empilés derrière, et un battement qui annonçait un worker en bonne santé.
+
+    Le processus est alors irrécupérable. On conclut le job pour que l'appelant cesse d'attendre,
+    puis on sort : le superviseur relancera un worker neuf.
+    """
+    job_id, age = _current_job_age_seconds()
+    if not job_id or age < _hard_budget_seconds():
+        return
+    logger.error(f"worker_stuck job_id={job_id} elapsed_s={age} : arrêt du processus")
+    _conclude_stuck_job(job_id, age)
+    os._exit(1)
+
+
+def _conclude_stuck_job(job_id: str, age: int) -> None:
+    """Marque le job avant de sortir. `mutation_started` est conservé : c'est lui qui dira à
+    l'appelant s'il peut rejouer."""
+    try:
+        job = jobs.get_job(job_id)
+        if job and job.get("status") == "running":
+            _fail(job, "worker_stuck", f"navigateur sans réponse depuis {age} s, worker redémarré")
+    except Exception as error:
+        logger.error(f"worker_stuck_conclude_failed error={type(error).__name__}")
+
+
+def _recover_orphan_jobs() -> None:
+    """Conclut les jobs laissés `running` par un worker disparu.
+
+    La clé d'idempotence n'est libérée que si aucune écriture n'avait été engagée — même règle
+    que sur un échec ordinaire, pour ne pas rouvrir la porte au doublon.
+    """
+    for job_id in jobs.iter_running_job_ids():
+        job = jobs.get_job(job_id)
+        if not job or job.get("status") != "running":
+            continue
+        logger.warning(f"job_id={job_id} orphelin : worker disparu en cours de traitement")
+        _fail(job, "worker_interrupted", "le worker a disparu pendant le traitement")
+        _release_idempotency(job)
 
 
 def _heartbeat_loop(stop: threading.Event) -> None:
@@ -64,6 +132,9 @@ def _heartbeat_loop(stop: threading.Event) -> None:
             jobs.worker_heartbeat(_heartbeat_payload())
         except Exception as error:
             logger.warning(f"heartbeat_failed error={type(error).__name__}")
+        # Ce thread est le seul encore vivant quand la boucle de jobs est suspendue : c'est donc
+        # lui qui doit constater le blocage.
+        _abort_if_stuck()
         stop.wait(HEARTBEAT_INTERVAL_SECONDS)
 
 
@@ -239,6 +310,7 @@ def main() -> int:
         return 1
 
     sweep_old_traces()
+    _recover_orphan_jobs()
     stop = threading.Event()
     beat = threading.Thread(target=_heartbeat_loop, args=(stop,), name="heartbeat", daemon=True)
     beat.start()
