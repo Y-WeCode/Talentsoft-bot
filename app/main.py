@@ -349,7 +349,9 @@ def build_idempotency_key(
 MAX_DOCUMENT_CATEGORIES = 10
 
 
-def effective_document_categories(document_category: str | None, document_categories: list[str] | None) -> list[str] | None:
+def effective_document_categories(
+    document_category: str | None, document_categories: list[str] | None
+) -> list[str] | None:
     """Liste ordonnée des catégories de dépôt, telle que le scraper l'essaiera.
 
     `document_categories` (champ multipart répété) prime ; `document_category` reste la première

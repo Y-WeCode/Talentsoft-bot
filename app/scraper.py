@@ -77,6 +77,7 @@ def category_list(categories: list[str] | str | None) -> list[str]:
         out.append(label)
     return out
 
+
 # Types d'exception sans ambiguite : le navigateur est perdu, quel que soit le libelle.
 # Compare sur le nom de classe car `TargetClosedError` n'est pas exporte par
 # `playwright.sync_api` ; l'importer depuis `playwright._impl._errors` creerait une dependance

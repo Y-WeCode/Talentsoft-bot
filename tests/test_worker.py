@@ -211,7 +211,9 @@ def test_a_replayable_failure_forgets_the_job_key_so_a_resubmission_creates_a_ne
     assert ts.idempotency.reserve("k-occupied")[0] == "reserved"
     assert ts.jobs.job_id_for_idempotency_key("k-occupied") is None
 
-    second = ts.jobs.enqueue_job(ts.jobs.JOB_TYPE_UPDATE_APPLICATION, {"candidate_email": "c@example.com", "offer_id": "25152"}, "k-occupied")
+    second = ts.jobs.enqueue_job(
+        ts.jobs.JOB_TYPE_UPDATE_APPLICATION, {"candidate_email": "c@example.com", "offer_id": "25152"}, "k-occupied"
+    )
     assert second["id"] != first["id"]
     assert second["status"] == "queued"
     assert ts.jobs.job_id_for_idempotency_key("k-occupied") == second["id"]
@@ -225,9 +227,13 @@ def test_enqueue_never_hands_back_a_terminal_job(ts):
     pump_worker(first["id"])
     ts.redis.set(f"{ts.jobs.IDEM_JOB_KEY_PREFIX}k-term", first["id"])
 
-    fresh = ts.jobs.enqueue_job(ts.jobs.JOB_TYPE_UPDATE_APPLICATION, {"candidate_email": "c@example.com", "offer_id": "25152"}, "k-term")
+    fresh = ts.jobs.enqueue_job(
+        ts.jobs.JOB_TYPE_UPDATE_APPLICATION, {"candidate_email": "c@example.com", "offer_id": "25152"}, "k-term"
+    )
     assert fresh["id"] != first["id"]
-    same = ts.jobs.enqueue_job(ts.jobs.JOB_TYPE_UPDATE_APPLICATION, {"candidate_email": "c@example.com", "offer_id": "25152"}, "k-term")
+    same = ts.jobs.enqueue_job(
+        ts.jobs.JOB_TYPE_UPDATE_APPLICATION, {"candidate_email": "c@example.com", "offer_id": "25152"}, "k-term"
+    )
     assert same["id"] == fresh["id"]
 
 
