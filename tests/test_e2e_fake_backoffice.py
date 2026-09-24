@@ -378,6 +378,90 @@ def test_several_documents_in_one_category_are_refused(bot, tmp_path):
     assert all(r["error"] == "multiple_documents_same_category" for r in results)
 
 
+def test_document_falls_back_to_the_first_free_category(bot, tmp_path):
+    """Liste ordonnée : « Compte rendu » occupé ⇒ dépôt en « Compte rendu 2 », catégorie utilisée rendue."""
+    app_page, _ = bot.open_application("candidat@example.com", "25152")
+    fallbacks = ["Compte rendu", "Compte rendu 2", "Compte rendu 3"]
+
+    first = bot.add_documents(app_page, [_pdf(tmp_path, "synthese.pdf")], fallbacks)
+    assert first[0]["ok"] is True, first
+    assert first[0]["category"] == "Compte rendu"
+    assert first[0]["categories_tried"] == ["Compte rendu"]
+
+    second = bot.add_documents(app_page, [_pdf(tmp_path, "synthese-v2.pdf")], fallbacks)
+    assert second[0]["ok"] is True, second
+    assert second[0]["verified"] is True
+    assert second[0]["category"] == "Compte rendu 2"
+    assert second[0]["categories_tried"] == ["Compte rendu", "Compte rendu 2"]
+    labels = [label.lower() for label in app_page.list_attachments()]
+    assert any("synthese-v2.pdf" in label and "compte rendu 2" in label for label in labels)
+    # Le document de « Compte rendu » est intact.
+    assert any("synthese.pdf" in label and "(compte rendu)" in label for label in labels)
+
+
+def test_document_already_present_in_a_fallback_is_skipped_not_redeposited(bot, tmp_path):
+    """Passe 1 sur toute la liste : le fichier déjà en « Compte rendu 2 » ne repart pas en « Compte rendu »."""
+    app_page, _ = bot.open_application("candidat@example.com", "25152")
+    path = _pdf(tmp_path, "rapport.pdf")
+    placed = bot.add_documents(app_page, [path], ["Compte rendu 2"])
+    assert placed[0]["ok"] is True
+
+    again = bot.add_documents(app_page, [path], ["Compte rendu", "Compte rendu 2"])
+    assert again[0]["ok"] is True
+    assert again[0]["skipped"] is True
+    assert again[0]["reason"] == "already_present"
+    assert again[0]["category"] == "Compte rendu 2"
+    assert again[0].get("mutation_started") is not True
+    # « Compte rendu » reste libre : aucun doublon.
+    assert not any("(compte rendu)" in label.lower() for label in app_page.list_attachments())
+
+
+def test_all_fallback_categories_occupied_refuses_with_details(bot, tmp_path):
+    app_page, _ = bot.open_application("candidat@example.com", "25152")
+    assert bot.add_documents(app_page, [_pdf(tmp_path, "a.pdf")], ["Compte rendu"])[0]["ok"] is True
+    assert bot.add_documents(app_page, [_pdf(tmp_path, "b.pdf")], ["Compte rendu 2"])[0]["ok"] is True
+    before = app_page.list_attachments()
+
+    results = bot.add_documents(app_page, [_pdf(tmp_path, "c.pdf")], ["Compte rendu", "Compte rendu 2"])
+
+    assert results[0]["ok"] is False
+    assert results[0]["error"] == "category_occupied"
+    assert results[0]["category"] == "Compte rendu"
+    assert results[0]["categories_tried"] == ["Compte rendu", "Compte rendu 2"]
+    assert results[0]["occupied_by"] == ["A.PDF"]
+    assert results[0]["occupied_by_category"] == {"Compte rendu": ["A.PDF"], "Compte rendu 2": ["B.PDF"]}
+    assert results[0].get("mutation_started") is not True
+    assert app_page.list_attachments() == before
+
+
+def test_category_absent_from_the_form_is_never_matched_by_substring(bot, tmp_path):
+    """« Compte rend » n'existe pas : on n'écrit rien, au lieu de viser « Compte rendu » par sous-chaîne."""
+    app_page, _ = bot.open_application("candidat@example.com", "25152")
+    before = app_page.list_attachments()
+
+    results = bot.add_documents(app_page, [_pdf(tmp_path, "x.pdf")], "Compte rend")
+
+    assert results[0]["ok"] is False
+    assert results[0]["error"] == "category_not_found"
+    assert results[0].get("mutation_started") is not True
+    assert app_page.list_attachments() == before
+
+
+def test_update_application_forwards_the_ordered_category_list(bot, tmp_path):
+    payload = bot.update_application(
+        candidate_email="candidat@example.com",
+        offer_id="25152",
+        document_paths=[_pdf(tmp_path, "liste.pdf")],
+        document_category="CV",
+        document_categories=["CV", "Autres documents"],
+    )
+    documents = payload["actions"]["documents"]
+    assert documents[0]["ok"] is True
+    # « CV » est occupé par le CV du candidat : repli sur « Autres documents ».
+    assert documents[0]["category"] == "Autres documents"
+    assert documents[0]["categories_tried"] == ["CV", "Autres documents"]
+
+
 def test_document_categories_referential_is_read_from_the_form(bot):
     categories = bot.read_document_categories("candidat@example.com", "25152")
     assert "CV" in categories

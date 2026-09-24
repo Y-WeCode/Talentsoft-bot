@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.4.0 (2026-09-24)
+
+Dépôt de documents avec **catégories de repli**, et correction du rejeu après un échec rejouable. Contrat
+additif : un appelant 0.3.0 n'a rien à changer. Note de migration : [docs/MIGRATION-0.4.0.md](docs/MIGRATION-0.4.0.md).
+
+### Ajouts
+
+- `POST /update-application` et `POST /applications/documents` acceptent un champ multipart **répété**
+  `document_categories` : liste ordonnée de catégories, `document_category` restant la première essayée.
+  Le bot dépose dans la **première catégorie libre** et rend la catégorie utilisée (`category`) et les
+  catégories parcourues (`categories_tried`). Deux passes sur toute la liste : déjà présent dans l'une des
+  catégories ⇒ `already_present` (aucun doublon), sinon première sans occupant. Toutes occupées ⇒
+  `category_occupied` avec `occupied_by_category`.
+- Nouveau résultat `category_not_found` : aucune catégorie libre demandée n'existe exactement dans le
+  formulaire. Rien n'est écrit.
+
+### Corrections
+
+- **Correspondance exacte des libellés de catégorie** (`AttachmentsDialog.file_input_for`, `set_files`) :
+  la correspondance par sous-chaîne faisait viser « Compte rendu 2 » quand « Compte rendu » était absent
+  du formulaire, alors que le garde-fou d'occupation avait été calculé sur le libellé demandé — écrasement
+  possible du document présent. Comportement par défaut, y compris en mono-catégorie.
+- **Rejeu après un échec rejouable** : la clé d'idempotence était libérée mais `ts:idemjob:<clé>` pointait
+  encore vers le job terminé ; une re-soumission sous la même clé recevait l'ancien job et l'ancien résultat
+  (`category_occupied`) pendant 24 h, sans qu'aucun travail ne reparte. Le job est désormais oublié avec la
+  clé, et `enqueue_job` ne rend jamais un job terminé.
+
 ## 0.3.0 (2026-09-13)
 
 Un seul navigateur pour tout le déploiement, piloté par une file. **Un `202` peut désormais répondre à un

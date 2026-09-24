@@ -85,7 +85,8 @@ Champs multipart :
 | `comment` | Commentaire de l'événement, **2000 caractères maximum**. Sans commentaire, aucun événement n'est créé |
 | `event_date` | `YYYY-MM-DD`, défaut aujourd'hui (converti en `JJ/MM/AAAA` pour le Back Office) |
 | `documents` | **0 ou 1** fichier (`pdf, doc, docx, rtf, tif, tiff, xlsx, zip`), 10 Mo max, contenu vérifié |
-| `document_category` | Libellé de la catégorie. Défaut `TS_DEFAULT_DOCUMENT_CATEGORY` |
+| `document_category` | Libellé de la catégorie. Défaut `TS_DEFAULT_DOCUMENT_CATEGORY`. Première catégorie essayée |
+| `document_categories` | Champ répété (0.4.0) : catégories de repli dans l'ordre, dépôt dans la première libre (voir docs/INTEGRATION.md §5) |
 | `idempotency_key` | Clé fournie par l'appelant. Sinon dérivée du contenu |
 
 ```bash

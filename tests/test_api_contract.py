@@ -104,6 +104,48 @@ def test_unverified_document_fails_success(app_module, monkeypatch):
     assert body["update_details"]["actions"]["documents"][0]["mutation_may_have_happened"] is True
 
 
+def test_document_categories_are_forwarded_as_an_ordered_list(app_module, fake_bot):
+    """Champ répété `document_categories` : nettoyé, dédoublonné, `document_category` en tête."""
+    client = TestClient(app_module.app)
+    response = client.post(
+        "/update-application",
+        data={
+            "candidate_email": "candidat@example.com",
+            "offer_id": "25152",
+            "document_category": "Compte rendu",
+            # champ multipart répété
+            "document_categories": ["Compte rendu 2", " compte rendu 2 ", "Compte rendu 3"],
+        },
+        files=[("documents", ("synthese.pdf", io.BytesIO(PDF), "application/pdf"))],
+        headers=AUTH,
+    )
+    assert response.status_code == 200
+    assert fake_bot.last_kwargs["document_categories"] == ["Compte rendu", "Compte rendu 2", "Compte rendu 3"]
+    assert fake_bot.last_kwargs["document_category"] == "Compte rendu"
+
+
+def test_single_document_category_keeps_the_previous_contract(app_module, fake_bot):
+    client = TestClient(app_module.app)
+    response = client.post(
+        "/update-application",
+        data={"candidate_email": "candidat@example.com", "offer_id": "25152", "document_category": "Autres documents"},
+        files=[("documents", ("synthese.pdf", io.BytesIO(PDF), "application/pdf"))],
+        headers=AUTH,
+    )
+    assert response.status_code == 200
+    assert fake_bot.last_kwargs["document_category"] == "Autres documents"
+    assert fake_bot.last_kwargs["document_categories"] == ["Autres documents"]
+
+
+def test_effective_document_categories_normalises_and_bounds(app_module):
+    effective = app_module.effective_document_categories
+    assert effective(None, None) is None
+    assert effective("CV", None) == ["CV"]
+    assert effective(None, ["Compte rendu", "compte rendu", "Compte rendu 2"]) == ["Compte rendu", "Compte rendu 2"]
+    assert effective("Compte rendu 2", ["Compte rendu 2", "Compte rendu"]) == ["Compte rendu 2", "Compte rendu"]
+    assert len(effective(None, [f"C{i}" for i in range(20)])) == app_module.MAX_DOCUMENT_CATEGORIES
+
+
 def test_rejects_when_nothing_to_do(app_module, fake_bot):
     client = TestClient(app_module.app)
     response = client.post(
@@ -425,7 +467,37 @@ def test_async_mode_enqueues_and_returns_202(app_module, fake_bot, monkeypatch):
     assert captured["candidate_email"] == "candidat@example.com"
     assert captured["offer_id"] == "25152"
     assert len(captured["document_paths"]) == 1
+    assert captured["document_categories"] is None  # aucune catégorie fournie : défaut du bot
     assert fake_bot.update_calls == 0
+
+
+def test_async_job_payload_carries_the_ordered_category_list(app_module, fake_bot, monkeypatch):
+    from app import jobs
+
+    captured = {}
+
+    def fake_enqueue(**kwargs):
+        captured.update(kwargs)
+        return {"id": "job-2", "status": "queued"}
+
+    monkeypatch.setattr(jobs, "is_async_jobs_enabled", lambda: True)
+    monkeypatch.setattr(jobs, "enqueue_update_application", fake_enqueue)
+    client = TestClient(app_module.app)
+    response = client.post(
+        "/update-application?async=1",
+        data={
+            "candidate_email": "candidat@example.com",
+            "offer_id": "25152",
+            "idempotency_key": "k",
+            "document_category": "Compte rendu",
+            "document_categories": ["Compte rendu 2"],
+        },
+        files=[("documents", ("cv.pdf", io.BytesIO(PDF), "application/pdf"))],
+        headers=AUTH,
+    )
+    assert response.status_code == 202
+    assert captured["document_category"] == "Compte rendu"
+    assert captured["document_categories"] == ["Compte rendu", "Compte rendu 2"]
 
 
 def test_events_route_json(app_module, fake_bot):
