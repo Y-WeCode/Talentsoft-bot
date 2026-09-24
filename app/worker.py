@@ -99,6 +99,7 @@ def _run_update_application(job: dict, payload: dict) -> dict:
             event_date=payload.get("event_date"),
             document_paths=payload.get("document_paths") or [],
             document_category=payload.get("document_category"),
+            document_categories=payload.get("document_categories"),
             on_mutation_started=on_mutation_started,
         )
 
@@ -216,6 +217,7 @@ def _remember_or_release(job: dict) -> None:
         return
     if safety.is_replayable_failure(job.get("result")):
         idempotency.release(key)
+        jobs.forget_idempotency_job(key)
         logger.info(f"job_id={job['id']} idempotency_released=true reason=replayable_failure")
         return
     idempotency.store_result(key, job["result"])
@@ -231,6 +233,7 @@ def _release_idempotency(job: dict) -> None:
         return
     if job.get("idempotency_key"):
         idempotency.release(job["idempotency_key"])
+        jobs.forget_idempotency_job(job["idempotency_key"])
 
 
 def main() -> int:

@@ -38,7 +38,7 @@ if not config.ts_username() or not config.ts_password():
     raise ValueError("Les variables d'environnement TS_USERNAME et TS_PASSWORD doivent être définies.")
 
 ENABLE_API_DOCS = config.enable_api_docs()
-API_VERSION = "0.3.0"
+API_VERSION = "0.4.0"
 
 security = HTTPBearer()
 T = TypeVar("T")
@@ -346,6 +346,34 @@ def build_idempotency_key(
     return f"f:{safety.short_hash('|'.join(parts))}"
 
 
+MAX_DOCUMENT_CATEGORIES = 10
+
+
+def effective_document_categories(document_category: str | None, document_categories: list[str] | None) -> list[str] | None:
+    """Liste ordonnée des catégories de dépôt, telle que le scraper l'essaiera.
+
+    `document_categories` (champ multipart répété) prime ; `document_category` reste la première
+    catégorie essayée et le seul champ compris par un bot 0.3.0. Libellés nettoyés, dédoublonnés
+    (casse et espaces ignorés), bornés à MAX_DOCUMENT_CATEGORIES. None = aucune catégorie fournie
+    (le scraper applique alors TS_DEFAULT_DOCUMENT_CATEGORY).
+    """
+    from .ts_pages import normalize_text
+
+    candidates = [document_category or ""] + list(document_categories or [])
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in candidates:
+        label = (raw or "").strip()
+        key = normalize_text(label)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(label)
+        if len(out) >= MAX_DOCUMENT_CATEGORIES:
+            break
+    return out or None
+
+
 def _replay_response(job_type: str, replay: dict) -> JSONResponse:
     logger.info(f"job_type={job_type} idempotent_replay=true")
     return JSONResponse(content=replay, status_code=200, headers={"X-Idempotent-Replay": "true"})
@@ -437,6 +465,7 @@ async def _run_mutation_via_worker(
         except Exception:
             # Rien n'a été empilé : la clé ne doit pas rester bloquée jusqu'à son TTL.
             idempotency.release(key)
+            jobs.forget_idempotency_job(key)
             raise
         if on_enqueued:
             on_enqueued()
@@ -457,6 +486,7 @@ def _mutation_payload(
     event_date: str | None = None,
     document_paths: list[str] | None = None,
     document_category: str | None = None,
+    document_categories: list[str] | None = None,
 ) -> dict:
     """Description d'une mutation, telle que le worker la relira."""
     return {
@@ -467,6 +497,7 @@ def _mutation_payload(
         "event_date": event_date,
         "document_paths": document_paths or [],
         "document_category": document_category,
+        "document_categories": document_categories,
     }
 
 
@@ -570,6 +601,10 @@ async def update_application(
     document_category: str = Form(
         None, description="Catégorie de pièce jointe (libellé ou code). Défaut : TS_DEFAULT_DOCUMENT_CATEGORY"
     ),
+    document_categories: list[str] = Form(
+        None,
+        description="Champ répété : catégories de repli, dans l'ordre. Le dépôt se fait dans la première catégorie libre ; document_category reste la première essayée",
+    ),
     documents: list[UploadFile] = File(default=[], description="Pièces jointes (0..n)"),
     idempotency_key: str = Form(None, description="Clé de dédoublonnage fournie par l'appelant"),
     token: str = Depends(verify_token),
@@ -587,6 +622,8 @@ async def update_application(
             raise HTTPException(status_code=400, detail="Rien à faire : ni commentaire ni document")
 
         key = build_idempotency_key(idempotency_key, email, offer, event_type, clean_comment, document_paths)
+        categories = effective_document_categories(document_category, document_categories)
+        first_category = categories[0] if categories else None
 
         if async_mode == 1:
             if not jobs.is_async_jobs_enabled():
@@ -608,7 +645,8 @@ async def update_application(
                 comment=clean_comment,
                 event_date=event_date,
                 document_paths=document_paths,
-                document_category=document_category,
+                document_category=first_category,
+                document_categories=categories,
                 idempotency_key=key,
             )
             document_paths = []  # propriété transférée au worker
@@ -625,7 +663,8 @@ async def update_application(
                     comment=clean_comment,
                     event_date=event_date,
                     document_paths=paths_for_job,
-                    document_category=document_category,
+                    document_category=first_category,
+                    document_categories=categories,
                 )
             )
 
@@ -639,7 +678,8 @@ async def update_application(
                 comment=clean_comment,
                 event_date=event_date,
                 document_paths=paths_for_job,
-                document_category=document_category,
+                document_category=first_category,
+                document_categories=categories,
             ),
             work=work,
             # Propriété des fichiers transférée au worker : ne plus les supprimer en sortie.
@@ -697,6 +737,7 @@ async def add_documents(
     offer_id: str = Form(..., description="Identifiant de l'offre"),
     documents: list[UploadFile] = File(..., description="Piece jointe (une seule : une categorie = un fichier)"),
     document_category: str = Form(None),
+    document_categories: list[str] = Form(None, description="Champ répété : catégories de repli, dans l'ordre"),
     idempotency_key: str = Form(None),
     token: str = Depends(verify_token),
 ):
@@ -710,6 +751,8 @@ async def add_documents(
             raise HTTPException(status_code=400, detail="Aucun document fourni")
         key = build_idempotency_key(idempotency_key, email, offer, None, None, document_paths)
         paths_for_job = list(document_paths)
+        categories = effective_document_categories(document_category, document_categories)
+        first_category = categories[0] if categories else None
 
         def work(bot):
             return _update_payload(
@@ -717,7 +760,8 @@ async def add_documents(
                     candidate_email=email,
                     offer_id=offer,
                     document_paths=paths_for_job,
-                    document_category=document_category,
+                    document_category=first_category,
+                    document_categories=categories,
                 )
             )
 
@@ -728,7 +772,8 @@ async def add_documents(
                 candidate_email=email,
                 offer_id=offer,
                 document_paths=paths_for_job,
-                document_category=document_category,
+                document_category=first_category,
+                document_categories=categories,
             ),
             work=work,
             on_enqueued=document_paths.clear,

@@ -105,7 +105,12 @@ def enqueue_job(
         existing = r.get(f"{IDEM_JOB_KEY_PREFIX}{idempotency_key}")
         if existing:
             job = get_job(existing)
-            if job:
+            # Un job encore en vie (queued/running) est rendu tel quel : deux appels identiques ne
+            # créent jamais deux jobs. Un job **terminé** ne l'est jamais : si l'appelant arrive ici,
+            # c'est que la clé d'idempotence a été libérée (échec rejouable, ex. `category_occupied`)
+            # ou a expiré — rendre l'ancien résultat rendrait le rejeu impossible pendant 24 h, le
+            # nouveau payload (autres catégories de repli…) n'étant jamais empilé.
+            if job and job.get("status") not in ("completed", "failed"):
                 return job
 
     job_id = str(uuid.uuid4())
@@ -124,7 +129,8 @@ def enqueue_job(
     pipe = r.pipeline()
     pipe.set(f"{JOB_KEY_PREFIX}{job_id}", json.dumps(job), ex=JOB_TTL_SECONDS)
     if idempotency_key:
-        pipe.set(f"{IDEM_JOB_KEY_PREFIX}{idempotency_key}", job_id, ex=JOB_TTL_SECONDS, nx=True)
+        # Écrasement volontaire : la clé peut encore pointer vers un job terminé (voir ci-dessus).
+        pipe.set(f"{IDEM_JOB_KEY_PREFIX}{idempotency_key}", job_id, ex=JOB_TTL_SECONDS)
     pipe.lpush(queue, job_id)
     pipe.execute()
     logger.info(f"enqueued job_id={job_id} type={job_type}")
@@ -141,6 +147,7 @@ def enqueue_update_application(
     document_paths: list[str],
     document_category: str | None,
     idempotency_key: str | None,
+    document_categories: list[str] | None = None,
 ) -> dict[str, Any]:
     payload = {
         "candidate_email": candidate_email,
@@ -150,8 +157,29 @@ def enqueue_update_application(
         "event_date": event_date,
         "document_paths": document_paths,
         "document_category": document_category,
+        # Liste ordonnée de catégories : dépôt dans la première libre (0.4.0). None = [document_category].
+        "document_categories": document_categories,
     }
     return enqueue_job(JOB_TYPE_UPDATE_APPLICATION, payload, idempotency_key)
+
+
+def forget_idempotency_job(key: str | None) -> None:
+    """Oublie le job associé à une clé d'idempotence libérée.
+
+    À appeler partout où `idempotency.release` l'est : sans cela, `ts:idemjob:<clé>` survivait 24 h à
+    la libération et une re-soumission sous la même clé recevait l'ancien job terminé (donc l'ancien
+    résultat, ex. `category_occupied`) au lieu d'en créer un nouveau — le rejeu promis par la
+    documentation était un no-op silencieux.
+    """
+    if not key:
+        return
+    r = _redis()
+    if r is None:
+        return
+    try:
+        r.delete(f"{IDEM_JOB_KEY_PREFIX}{key}")
+    except Exception as error:  # pragma: no cover - Redis indisponible : le TTL fera le ménage
+        logger.warning(f"forget_idempotency_job_failed error={type(error).__name__}")
 
 
 def job_id_for_idempotency_key(key: str) -> str | None:

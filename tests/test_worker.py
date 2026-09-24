@@ -198,6 +198,39 @@ def test_a_failure_without_any_write_stays_replayable(ts):
     assert ts.idempotency.reserve("k-rejouable")[0] == "reserved"
 
 
+def test_a_replayable_failure_forgets_the_job_key_so_a_resubmission_creates_a_new_job(ts):
+    """Le piège corrigé en 0.4.0 : après `category_occupied`, la clé était libérée mais `ts:idemjob:`
+    pointait encore vers le job terminé ; la re-soumission (avec d'autres catégories de repli) recevait
+    l'ancien job et l'ancien résultat, sans qu'aucun travail ne reparte."""
+    ts.install(FakeBot(actions={"documents": [{"ok": False, "error": "category_occupied"}]}, mutation_started=False))
+    first = ts.push(key="k-occupied")
+    done = pump_worker(first["id"])
+
+    assert done["status"] == "completed"
+    assert done["result"]["success"] is False
+    assert ts.idempotency.reserve("k-occupied")[0] == "reserved"
+    assert ts.jobs.job_id_for_idempotency_key("k-occupied") is None
+
+    second = ts.jobs.enqueue_job(ts.jobs.JOB_TYPE_UPDATE_APPLICATION, {"candidate_email": "c@example.com", "offer_id": "25152"}, "k-occupied")
+    assert second["id"] != first["id"]
+    assert second["status"] == "queued"
+    assert ts.jobs.job_id_for_idempotency_key("k-occupied") == second["id"]
+
+
+def test_enqueue_never_hands_back_a_terminal_job(ts):
+    """Même si la clé pointe encore vers un job terminé (ancienne version, TTL), une nouvelle
+    soumission crée un nouveau job ; un job encore en vie est en revanche rendu tel quel."""
+    ts.install(FakeBot())
+    first = ts.push(key="k-term")
+    pump_worker(first["id"])
+    ts.redis.set(f"{ts.jobs.IDEM_JOB_KEY_PREFIX}k-term", first["id"])
+
+    fresh = ts.jobs.enqueue_job(ts.jobs.JOB_TYPE_UPDATE_APPLICATION, {"candidate_email": "c@example.com", "offer_id": "25152"}, "k-term")
+    assert fresh["id"] != first["id"]
+    same = ts.jobs.enqueue_job(ts.jobs.JOB_TYPE_UPDATE_APPLICATION, {"candidate_email": "c@example.com", "offer_id": "25152"}, "k-term")
+    assert same["id"] == fresh["id"]
+
+
 def test_a_successful_job_is_still_memorised(ts):
     """L'idempotence garde tout son role sur ce qui a abouti."""
     ts.install(FakeBot())

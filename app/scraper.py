@@ -61,6 +61,22 @@ from .ts_pages import (
 
 logger = logging.getLogger(__name__)
 
+
+def category_list(categories: list[str] | str | None) -> list[str]:
+    """Liste ordonnée de catégories, nettoyée : libellés vides retirés, doublons (casse et espaces
+    ignorés) retirés en gardant la première occurrence. Une chaîne seule = liste d'un élément."""
+    raw = [categories] if isinstance(categories, str) else list(categories or [])
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in raw:
+        label = (value or "").strip()
+        key = normalize_text(label)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(label)
+    return out
+
 # Types d'exception sans ambiguite : le navigateur est perdu, quel que soit le libelle.
 # Compare sur le nom de classe car `TargetClosedError` n'est pas exporte par
 # `playwright.sync_api` ; l'importer depuis `playwright._impl._errors` creerait une dependance
@@ -928,26 +944,33 @@ class TalentsoftBot:
         self,
         app_page: ApplicationPage,
         document_paths: list[str],
-        category: str | None,
+        categories: list[str] | str | None,
     ) -> list[dict]:
-        """Dépose les documents, tous dans la même catégorie, en une seule validation.
+        """Dépose le document dans la **première catégorie libre** d'une liste ordonnée, en une validation.
 
         GARDE-FOU NON CONTOURNABLE : déposer dans une catégorie déjà occupée détruit le
         document existant sans avertissement, et le formulaire n'indique pas l'occupation.
         On lit donc l'état de la fiche avant d'ouvrir la modale.
+
+        Deux passes, sur toute la liste : (1) le fichier est déjà présent dans l'une des catégories
+        ⇒ rien à faire (`already_present`, `category` = celle qui le contient, même si la première
+        s'est libérée entre-temps) ; (2) première catégorie sans occupant ⇒ dépôt. Toutes occupées ⇒
+        `category_occupied` avec le détail par catégorie (`occupied_by_category`). La catégorie retenue
+        doit exister **exactement** dans le formulaire : jamais de correspondance par sous-chaîne
+        (« Compte rendu » absent ne doit pas viser « Compte rendu 2 »), sinon `category_not_found`.
+        `category` de chaque résultat = catégorie effectivement utilisée ; `categories_tried` = celles
+        parcourues dans l'ordre.
         """
         results: list[dict] = []
         if not document_paths:
             return results
-        if not category:
+        wanted = category_list(categories)
+        if not wanted:
             return [
                 {"ok": False, "error": "document_category_required", "filename": os.path.basename(path)}
                 for path in document_paths
             ]
-
-        occupied = app_page.attachments_by_category()
-        existing_labels = [normalize_text(label) for label in app_page.list_attachments()]
-        category_key = normalize_text(category)
+        first = wanted[0]
 
         # Une seule catégorie disponible par dépôt : au-delà d'un fichier, les suivants
         # écraseraient le précédent dans le même champ.
@@ -957,32 +980,39 @@ class TalentsoftBot:
                     "ok": False,
                     "error": "multiple_documents_same_category",
                     "filename": os.path.basename(path),
-                    "category": category,
+                    "category": first,
                 }
                 for path in document_paths
             ]
 
         path = document_paths[0]
         display_name = safety.safe_display_filename(os.path.basename(path))
-        item: dict = {"ok": False, "filename": display_name, "category": category}
+        item: dict = {"ok": False, "filename": display_name, "category": first, "categories_tried": list(wanted)}
 
         if not os.path.exists(path):
             item["error"] = "file_not_found"
             return [item]
 
-        # Déjà déposé à l'identique : rien à faire (le nom EST affiché, donc fiable ici).
-        expected_label = normalize_text(f"{display_name} ({category})")
-        if expected_label in existing_labels:
-            item.update({"ok": True, "skipped": True, "reason": "already_present"})
-            return [item]
+        occupied = app_page.attachments_by_category()
+        existing_labels = [normalize_text(label) for label in app_page.list_attachments()]
 
-        if occupied.get(category_key):
-            logger.warning(f"category_occupied category={category_key!r}")
+        # Passe 1 : déjà déposé à l'identique dans l'une des catégories (le nom EST affiché, donc fiable).
+        for category in wanted:
+            if normalize_text(f"{display_name} ({category})") in existing_labels:
+                item.update({"ok": True, "skipped": True, "reason": "already_present", "category": category})
+                item["categories_tried"] = wanted[: wanted.index(category) + 1]
+                return [item]
+
+        # Passe 2 : première catégorie sans occupant.
+        free = [category for category in wanted if not occupied.get(normalize_text(category))]
+        if not free:
+            logger.warning(f"category_occupied categories={[normalize_text(c) for c in wanted]!r}")
             item.update(
                 {
                     "ok": False,
                     "error": "category_occupied",
-                    "occupied_by": occupied[category_key][:3],
+                    "occupied_by": occupied.get(normalize_text(first), [])[:3],
+                    "occupied_by_category": {c: occupied.get(normalize_text(c), [])[:3] for c in wanted},
                 }
             )
             return [item]
@@ -990,8 +1020,18 @@ class TalentsoftBot:
         dialog = AttachmentsDialog(self.page, self.deadline, config.action_timeout_ms())
         try:
             frame = dialog.open()
-            resolved = dialog.set_files(frame, {category: path})
-            item["category"] = resolved.get(category, category)
+            rows = {normalize_text(label): label for label in dialog.category_rows(frame)}
+            chosen = next((category for category in free if normalize_text(category) in rows), None)
+            if chosen is None:
+                # Aucune des catégories libres n'existe telle quelle dans le formulaire : on n'écrit rien
+                # (une correspondance approximative viserait la ligne d'une autre catégorie).
+                dialog.cancel()
+                logger.warning(f"category_not_found categories={[normalize_text(c) for c in free]!r}")
+                item.update({"ok": False, "error": "category_not_found"})
+                return [item]
+            item["categories_tried"] = wanted[: wanted.index(chosen) + 1]
+            resolved = dialog.set_files(frame, {chosen: path}, exact=True)
+            item["category"] = resolved.get(chosen) or rows[normalize_text(chosen)]
             item["mutation_started"] = True
             self._notify_mutation_started()
             dialog.submit(frame)
@@ -1040,6 +1080,7 @@ class TalentsoftBot:
         event_date: str | None = None,
         document_paths: list[str] | None = None,
         document_category: str | None = None,
+        document_categories: list[str] | None = None,
         on_mutation_started: Callable[[], None] | None = None,
     ) -> dict:
         """Événement + documents sur une candidature. Retourne le détail par action.
@@ -1080,8 +1121,11 @@ class TalentsoftBot:
                 mutation_started = mutation_started or bool(actions["event"].get("mutation_started"))
 
             if document_paths:
-                effective_category = document_category or config.ts_default_document_category() or None
-                actions["documents"] = self.add_documents(app_page, document_paths, effective_category)
+                # Liste ordonnée (0.4.0) ; à défaut la catégorie unique, puis le défaut du bot.
+                effective_categories = category_list(document_categories) or category_list(
+                    document_category or config.ts_default_document_category() or None
+                )
+                actions["documents"] = self.add_documents(app_page, document_paths, effective_categories)
                 mutation_started = mutation_started or any(d.get("mutation_started") for d in actions["documents"])
 
             failed = not safety.actions_succeeded(actions)
