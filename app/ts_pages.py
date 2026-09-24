@@ -1020,27 +1020,32 @@ class AttachmentsDialog:
             logger.debug(f"category_rows_failed error={type(error).__name__}")
             return []
 
-    def file_input_for(self, frame: FrameLocator, category: str) -> Locator:
+    def file_input_for(self, frame: FrameLocator, category: str, exact: bool = True) -> Locator:
         """Champ fichier de la ligne portant ce libellé de catégorie.
 
         Recherche par libellé et jamais par indice `ctlNN` : les indices se décalent dès
         qu'une catégorie est ajoutée au paramétrage du client.
+
+        Correspondance **exacte** par défaut depuis 0.4.0 : la correspondance par sous-chaîne
+        (`exact=False`) faisait viser « Compte rendu 2 » quand « Compte rendu » était absent du
+        formulaire — alors que le garde-fou d'occupation avait été calculé sur le libellé demandé,
+        d'où un écrasement possible du document présent en « Compte rendu 2 ».
         """
         labels = self.category_rows(frame)
         wanted = normalize_text(category)
         index = next((i for i, label in enumerate(labels) if normalize_text(label) == wanted), -1)
-        if index < 0:
+        if index < 0 and not exact:
             index = next((i for i, label in enumerate(labels) if wanted and wanted in normalize_text(label)), -1)
         if index < 0:
             raise SelectorNotFound(f"catégorie de pièce jointe introuvable: {category!r}")
         return frame.locator(sel.ATTACHMENT_FILE_INPUTS[0]).nth(index)
 
-    def set_files(self, frame: FrameLocator, files_by_category: dict[str, str]) -> dict[str, str]:
+    def set_files(self, frame: FrameLocator, files_by_category: dict[str, str], exact: bool = True) -> dict[str, str]:
         """Remplit un champ par catégorie. Retourne le libellé réellement retenu par catégorie."""
         labels = self.category_rows(frame)
         resolved: dict[str, str] = {}
         for category, path in files_by_category.items():
-            control = self.file_input_for(frame, category)
+            control = self.file_input_for(frame, category, exact=exact)
             control.set_input_files(path, timeout=self._t())
             wanted = normalize_text(category)
             match = next((label for label in labels if normalize_text(label) == wanted), None)
