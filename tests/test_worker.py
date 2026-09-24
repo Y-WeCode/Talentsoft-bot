@@ -281,3 +281,106 @@ def test_an_unverified_write_is_memorised(ts):
 
     assert done["result"]["success"] is False
     assert ts.idempotency.reserve("k-incertain")[0] == "replay"
+
+
+# --- Worker suspendu et jobs orphelins --------------------------------------------------------
+#
+# Les delais de Playwright sont appliques PAR SON PILOTE. Quand celui-ci meurt, l'appel Python
+# reste suspendu sans exception ni timeout. Constate en recette : six jours sur le meme job,
+# quinze jobs empiles derriere, et un battement de coeur qui annoncait un worker en bonne sante.
+
+
+def _worker():
+    from app import worker as worker_module
+
+    return worker_module
+
+
+def test_a_job_left_running_is_concluded_at_startup(ts):
+    """Sans cette reprise, le job reste « en cours » jusqu'a son TTL de 24 h."""
+    job = ts.push(key="k-orphelin")
+    job["status"] = "running"
+    ts.jobs.save_job(job)
+
+    _worker()._recover_orphan_jobs()
+
+    recovered = ts.jobs.get_job(job["id"])
+    assert recovered["status"] == "failed"
+    assert recovered["error_code"] == "worker_interrupted"
+    # Rien n'avait ete ecrit : la cle redevient disponible.
+    assert ts.idempotency.reserve("k-orphelin")[0] == "reserved"
+
+
+def test_an_orphan_that_had_written_keeps_its_key(ts):
+    """Une ecriture engagee puis perdue ne se rejoue pas : la cle reste prise."""
+    job = ts.push(key="k-orphelin-ecrit")
+    job["status"] = "running"
+    job["mutation_started"] = True
+    ts.jobs.save_job(job)
+
+    _worker()._recover_orphan_jobs()
+
+    recovered = ts.jobs.get_job(job["id"])
+    assert recovered["error_code"] == "worker_interrupted"
+    assert recovered["mutation_started"] is True
+    assert ts.idempotency.reserve("k-orphelin-ecrit")[0] == "in_progress"
+
+
+def test_a_finished_job_is_left_alone(ts):
+    """La reprise ne doit toucher qu'aux jobs restes en cours."""
+    ts.install(FakeBot())
+    done_job = pump_worker(ts.push(key="k-fini")["id"])
+
+    _worker()._recover_orphan_jobs()
+
+    assert ts.jobs.get_job(done_job["id"])["status"] == "completed"
+
+
+def test_the_watchdog_leaves_a_job_within_its_budget_alone(ts, monkeypatch):
+    worker_module = _worker()
+    exits = []
+    monkeypatch.setattr(worker_module.os, "_exit", lambda code: exits.append(code))
+    job = ts.push()
+    worker_module._set_current_job(job["id"])
+
+    worker_module._abort_if_stuck()
+
+    assert exits == [], "un job qui vient de demarrer ne doit pas tuer le worker"
+    worker_module._set_current_job(None)
+
+
+def test_the_watchdog_concludes_the_job_and_exits_when_stuck(ts, monkeypatch):
+    """Le processus est irrecuperable : on conclut le job, puis on sort."""
+    worker_module = _worker()
+    exits = []
+    monkeypatch.setattr(worker_module.os, "_exit", lambda code: exits.append(code))
+    monkeypatch.setattr(worker_module, "_hard_budget_seconds", lambda: 0)
+
+    job = ts.push(key="k-bloque")
+    job["status"] = "running"
+    ts.jobs.save_job(job)
+    worker_module._set_current_job(job["id"])
+    try:
+        worker_module._abort_if_stuck()
+    finally:
+        worker_module._set_current_job(None)
+
+    assert exits == [1]
+    concluded = ts.jobs.get_job(job["id"])
+    assert concluded["status"] == "failed"
+    assert concluded["error_code"] == "worker_stuck"
+
+
+def test_the_heartbeat_exposes_how_long_the_job_has_been_running(ts):
+    """Un battement qui dit seulement « vivant » a laisse passer six jours de blocage."""
+    worker_module = _worker()
+    job = ts.push()
+    worker_module._set_current_job(job["id"])
+    try:
+        payload = worker_module._heartbeat_payload()
+    finally:
+        worker_module._set_current_job(None)
+
+    assert payload["current_job_id"] == job["id"]
+    assert payload["current_job_seconds"] >= 0
+    assert worker_module._heartbeat_payload()["current_job_id"] is None

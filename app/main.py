@@ -410,6 +410,21 @@ async def run_idempotent_update(
     return await _run_mutation_in_api(job_type=job_type, key=key, work=work)
 
 
+def _free_idempotency(key: str) -> None:
+    """Libère la clé **et** oublie le job qui lui était associé.
+
+    Les deux vont toujours ensemble : `ts:idem:<clé>` autorise une nouvelle réservation, mais
+    `ts:idemjob:<clé>` survivrait 24 h et `enqueue_job` rendrait l'ancien job au lieu d'en créer
+    un neuf — le rejeu redeviendrait un no-op silencieux.
+
+    Le chemin synchrone n'empile aucun job, donc l'oubli y est le plus souvent sans effet. Il
+    couvre le cas d'un déploiement qui bascule entre mode worker et mode mono-processus, et
+    surtout il tient la règle : jamais l'un sans l'autre.
+    """
+    idempotency.release(key)
+    jobs.forget_idempotency_job(key)
+
+
 async def _run_mutation_in_api(*, job_type: str, key: str, work: Callable[[object], dict]) -> JSONResponse:
     state, replay = idempotency.reserve(key)
     if state == "replay" and replay is not None:
@@ -420,14 +435,14 @@ async def _run_mutation_in_api(*, job_type: str, key: str, work: Callable[[objec
         payload = await run_browser_async(job_type, work)
     except HTTPException as error:
         # Mutation non démarrée (503, 404, 500 bootstrap) : la clé est libérée pour un rejeu légitime.
-        idempotency.release(key)
+        _free_idempotency(key)
         raise error
     except Exception:
-        idempotency.release(key)
+        _free_idempotency(key)
         raise
     if safety.is_replayable_failure(payload):
         # Rien n'a été écrit : mémoriser interdirait le rejeu que la documentation promet.
-        idempotency.release(key)
+        _free_idempotency(key)
         logger.info(f"job_type={job_type} idempotency_released=true reason=replayable_failure")
     else:
         idempotency.store_result(key, payload)

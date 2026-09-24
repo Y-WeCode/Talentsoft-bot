@@ -113,6 +113,12 @@ class FakeRedis:
         with self._lock:
             self.kv.pop(key, None)
 
+    def scan_iter(self, match=None, count=None):
+        prefix = (match or "*").rstrip("*")
+        with self._lock:
+            keys = [k for k in self.kv if k.startswith(prefix)]
+        return iter(keys)
+
     def expire(self, key, seconds):
         return True
 

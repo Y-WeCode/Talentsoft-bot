@@ -163,6 +163,33 @@ def enqueue_update_application(
     return enqueue_job(JOB_TYPE_UPDATE_APPLICATION, payload, idempotency_key)
 
 
+def iter_running_job_ids() -> list[str]:
+    """Jobs restés `running` : leur worker a disparu sans les conclure.
+
+    Sans cette reprise, un tel job garde son état jusqu'à l'expiration de son TTL de 24 h, et
+    l'appelant interroge `/jobs/{id}` en attendant une réponse qui ne viendra jamais. Le balayage
+    est borné par ce même TTL.
+    """
+    r = _redis()
+    if r is None:
+        return []
+    out: list[str] = []
+    try:
+        for key in r.scan_iter(match=f"{JOB_KEY_PREFIX}*", count=200):
+            raw = r.get(key)
+            if not raw:
+                continue
+            try:
+                job = json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+            if job.get("status") == "running" and job.get("id"):
+                out.append(job["id"])
+    except Exception as error:
+        logger.warning(f"scan_running_jobs_failed error={type(error).__name__}")
+    return out
+
+
 def forget_idempotency_job(key: str | None) -> None:
     """Oublie le job associé à une clé d'idempotence libérée.
 

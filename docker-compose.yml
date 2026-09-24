@@ -44,8 +44,13 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    shm_size: "1gb"
-    mem_limit: 2g
+    # Chromium plus Python, sur une session qui vit desormais deux heures d'affilee. A 2 Go, le
+    # noyau tuait le renderer en cours de job — constate deux fois le 24/09, « Page crashed » puis
+    # une assertion du pilote. Une limite n'est pas une reservation : la lever ne coute rien tant
+    # qu'elle n'est pas atteinte. Le plafond qui compte est celui du service qui possede le
+    # navigateur, lequel depend de TS_ASYNC_JOBS_ENABLED : on leve donc les deux.
+    shm_size: "2gb"
+    mem_limit: 6g
     cpus: 2.0
     restart: unless-stopped
 
@@ -88,8 +93,13 @@ services:
       timeout: 10s
       start_period: 60s
       retries: 3
-    shm_size: "1gb"
-    mem_limit: 2g
+    # Chromium plus Python, sur une session qui vit desormais deux heures d'affilee. A 2 Go, le
+    # noyau tuait le renderer en cours de job — constate deux fois le 24/09, « Page crashed » puis
+    # une assertion du pilote. Une limite n'est pas une reservation : la lever ne coute rien tant
+    # qu'elle n'est pas atteinte. Le plafond qui compte est celui du service qui possede le
+    # navigateur, lequel depend de TS_ASYNC_JOBS_ENABLED : on leve donc les deux.
+    shm_size: "2gb"
+    mem_limit: 6g
     cpus: 2.0
     restart: unless-stopped
     profiles:
