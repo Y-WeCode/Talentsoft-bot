@@ -135,7 +135,8 @@ L'email n'est jamais renvoyé en clair : seule son empreinte figure dans la rép
 | `{"ok": true, "verified": true}` | Mutation relue dans le Back Office | Terminé |
 | `{"ok": true, "skipped": true, "reason": "already_present"}` | Document déjà présent à l'identique | Terminé |
 | `{"ok": false, "error": "category_occupied"}` | **La catégorie contient déjà un document : déposer l'aurait détruit** | Choisir une autre catégorie, ou traiter à la main |
-| `{"ok": false, "error": "comment_too_long"}` | Commentaire au-delà de 2000 caractères | Raccourcir et rejouer, aucune mutation n'a eu lieu |
+| `{"ok": false, "error": "comment_too_long"}` | Le champ a tronqué la saisie (> 2000 caractères) | Raccourcir et rejouer, aucune mutation n'a eu lieu |
+| `{"ok": false, "error": "comment_not_retained"}` | Le champ n'a rien retenu, après trois tentatives | Rejouer tel quel : la longueur n'est pas en cause |
 | `{"ok": false, "error": "multiple_documents_same_category"}` | Plusieurs fichiers pour une seule catégorie | Un appel par document |
 | `{"ok": false, "error": "event_failed" \| "upload_failed"}` | Échec avant clic de validation | Rejeu possible |
 | `{"ok": false, "error": "unverified", "mutation_may_have_happened": true}` | Clic effectué, relecture non confirmée | Statut indéterminé : relire `GET /applications/events` avant tout rejeu |

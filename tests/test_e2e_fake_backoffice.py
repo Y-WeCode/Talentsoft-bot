@@ -63,6 +63,8 @@ class FakeServer:
         # Cookies restaures mais perimes : le tenant sert une page que le bot ne reconnait pas.
         # Consommee une seule fois — une fois le contexte vide, le parcours normal reprend.
         self.stale_restored_session = False
+        # Reproduit un postback qui efface la premiere saisie du commentaire.
+        self.wipe_first_comment = False
         self.blocked: list[str] = []
 
     def install(self, context):
@@ -137,7 +139,10 @@ class FakeServer:
         if path == "/Pages/Applicants/MainPage.aspx":
             return route.fulfill(status=200, content_type="text/html", body=_page("applicant.html"))
         if path == "/Pages/Applicants.Events/JobApplicationChildEventEdit.aspx":
-            return route.fulfill(status=200, content_type="text/html", body=_page("event-dialog.html"))
+            body = _page("event-dialog.html")
+            if self.wipe_first_comment:
+                body = body.replace("location.search", "'?wipefirst'")
+            return route.fulfill(status=200, content_type="text/html", body=body)
         if path == "/Pages/Correspondence/ActionMailLanguageChoicePage.aspx":
             return route.fulfill(status=200, content_type="text/html", body=_page("mail-language-dialog.html"))
         if path == "/Pages/Utils/AttachedFileEdit.aspx":
@@ -309,6 +314,34 @@ def test_event_text_does_not_depend_on_the_row_being_displayed(bot):
     folded = app_page.list_events("25152")
 
     assert folded == displayed
+
+
+def test_a_comment_wiped_by_a_postback_is_typed_again(bot):
+    """Le choix du type recharge l'iframe : si le postback atterrit apres la saisie, le champ est
+    vide et le commentaire partirait vide. Constate en recette — 0 caractere relu pour 49.
+
+    Saisir un champ n'ecrit rien tant que rien n'est valide : on peut donc re-resoudre le champ
+    et recommencer, sans risquer la moindre mutation.
+    """
+    bot._server.wipe_first_comment = True
+    app_page, _ = bot.open_application("candidat@example.com", "25152")
+
+    result = bot.add_event(app_page, "25152", "En attente", "Synthese Hippolyte.ai", "2026-09-25")
+
+    assert result["ok"] is True, result
+    assert result["verified"] is True
+
+
+def test_a_truncated_comment_is_not_retried_and_says_so(bot):
+    """Tronque n'est pas vide : le champ a bien recu la saisie, elle ne tient pas. Le code doit
+    envoyer raccourcir, pas rejouer."""
+    app_page, _ = bot.open_application("candidat@example.com", "25152")
+
+    result = bot.add_event(app_page, "25152", "En attente", "x" * 2500, "2026-09-25")
+
+    assert result["ok"] is False
+    assert result["error"] == "comment_too_long"
+    assert result.get("mutation_started") is not True
 
 
 def test_comment_longer_than_field_is_refused_without_mutating(bot):

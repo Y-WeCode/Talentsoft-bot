@@ -252,7 +252,8 @@ réponse, et il n'apparaît pas non plus dans les logs du bot.
 | `ok: true, skipped: true, reason: "already_present"` | Document déjà présent à l'identique dans l'une des catégories demandées (`category` la désigne) | Terminé |
 | `ok: false, error: "category_occupied"` | Toutes les catégories demandées contiennent déjà un document ; y déposer l'aurait **détruit**. `occupied_by` (première catégorie) et `occupied_by_category` listent ce qui s'y trouve, `categories_tried` ce qui a été essayé | **Cas métier**, pas technique : arbitrage humain ou autres catégories de repli. Pas de rejeu automatique ; un rejeu **avec d'autres catégories** sous la même clé crée un nouveau job (§8) |
 | `ok: false, error: "category_not_found"` | Aucune catégorie libre demandée n'existe **exactement** dans le formulaire (libellé erroné ou absent du paramétrage). Rien n'a été écrit | Corriger les libellés (référentiel §10) et rejouer |
-| `ok: false, error: "comment_too_long"` | Commentaire > 2000 caractères. Rien n'a été écrit | Raccourcir et rejouer |
+| `ok: false, error: "comment_too_long"` | Le champ a reçu la saisie mais l'a tronquée (> 2000 caractères). Rien n'a été écrit | **Raccourcir** puis rejouer |
+| `ok: false, error: "comment_not_retained"` | Le champ n'a rien retenu du tout, après trois tentatives. Rien n'a été écrit | **Rejouer tel quel** : la longueur n'est pas en cause |
 | `ok: false, error: "multiple_documents_same_category"` | Plusieurs fichiers pour une catégorie | Un appel par document |
 | `ok: false, error: "event_type_required"` | Aucun type fourni et aucun défaut configuré | Corriger l'appel ou la configuration du bot |
 | `ok: false, error: "event_failed"` / `"upload_failed"` | Échec **avant** le clic de validation. Rien n'a été écrit | Rejeu possible |

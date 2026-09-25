@@ -50,6 +50,19 @@ class CategoryOccupied(Exception):
     """La catégorie de pièce jointe contient déjà un document : déposer l'écraserait."""
 
 
+class CommentNotAccepted(ValueError):
+    """Le champ commentaire n'a pas retenu la saisie.
+
+    Deux causes distinctes, que l'appelant ne doit pas confondre : un texte tronqué se corrige
+    en le raccourcissant, un champ vidé se rejoue tel quel. Les appeler pareil enverrait
+    l'intégrateur raccourcir un commentaire de 49 caractères — constaté en recette.
+    """
+
+    def __init__(self, code: str, read: int, expected: int):
+        super().__init__(f"{code} ({read}/{expected} caractères)")
+        self.code = code
+
+
 class MailDialogOpened(Exception):
     """L'action ouvre un envoi de courrier au candidat, pas un formulaire d'événement.
 
@@ -926,6 +939,12 @@ class EventDialog:
         if event_type:
             control = first_locator(self.page, sel.EVENT_TYPE_SELECT, self._t(), scope=frame, require_visible=False)
             chosen_type = choose_option(self.page, control, event_type, self._t())
+            # Le formulaire s'adapte au type choisi via un postback : attendre qu'il retombe évite
+            # de saisir dans un DOM sur le point d'être remplacé.
+            try:
+                self.page.wait_for_load_state("networkidle", timeout=min(self._t(), 5000))
+            except Exception:
+                pass
 
         if event_date:
             ts_date = to_talentsoft_date(event_date)
@@ -935,13 +954,39 @@ class EventDialog:
             except SelectorNotFound:
                 logger.info("event_date ignorée : aucun champ date dans le formulaire")
 
-        comment_input = first_locator(self.page, sel.EVENT_COMMENT, self._t(), scope=frame)
-        comment_input.fill(comment, timeout=self._t())
-        # Le champ porte maxlength=2000 : on vérifie que rien n'a été tronqué.
-        typed = comment_input.input_value(timeout=self._t())
-        if len(typed) != len(comment):
-            raise ValueError(f"commentaire tronqué par le Back Office ({len(typed)}/{len(comment)} caractères)")
+        self._fill_comment(frame, comment)
         return chosen_type
+
+    # Saisir un champ n'écrit rien tant que rien n'est validé : réessayer ici ne risque aucune
+    # mutation. Trois tentatives suffisent pour absorber un postback en vol.
+    _COMMENT_ATTEMPTS = 3
+
+    def _fill_comment(self, frame: FrameLocator, comment: str) -> None:
+        """Saisit le commentaire et le relit, en re-résolvant le champ à chaque tentative.
+
+        Le choix du type déclenche un postback ASP.NET qui recharge l'iframe. S'il atterrit après
+        la saisie, le champ est vidé et le commentaire partirait vide : constaté en recette, une
+        relecture à 0 caractère pour un commentaire de 49. Le nœud obtenu avant le postback
+        appartient alors à un DOM remplacé — d'où la re-résolution, et non un simple nouvel essai
+        sur le même locator.
+
+        Le champ porte `maxlength=2000` : une relecture plus courte mais non vide reste une
+        troncature, qui elle ne se corrige pas en réessayant.
+        """
+        read = 0
+        for attempt in range(self._COMMENT_ATTEMPTS):
+            control = first_locator(self.page, sel.EVENT_COMMENT, self._t(), scope=frame)
+            control.fill(comment, timeout=self._t())
+            typed = control.input_value(timeout=self._t())
+            read = len(typed)
+            if read == len(comment):
+                return
+            if read:
+                # Tronqué : le champ a bien reçu la saisie, elle ne tient pas. Inutile d'insister.
+                raise CommentNotAccepted("comment_too_long", read, len(comment))
+            logger.info(f"event_comment_refill attempt={attempt + 1} expected={len(comment)}")
+            self.page.wait_for_timeout(500)
+        raise CommentNotAccepted("comment_not_retained", read, len(comment))
 
     def submit(self, frame: FrameLocator) -> None:
         submit = first_locator(self.page, sel.EVENT_SUBMIT, self._t(), scope=frame, require_visible=False)

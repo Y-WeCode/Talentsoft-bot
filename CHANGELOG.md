@@ -78,6 +78,17 @@ dans l'api pendant que le worker tenait son propre navigateur.
 
 ### Fiabilité
 
+- **Un commentaire vidé par un postback était rapporté « trop long ».** Le choix du type d'événement
+  recharge l'iframe ; quand ce postback atterrissait après la saisie, le champ était vide à la
+  relecture. Le bot annulait bien avant toute écriture — le garde-fou fonctionnait — mais rendait
+  `comment_too_long`, envoyant l'intégrateur raccourcir un commentaire de 49 caractères dans un
+  champ qui en accepte 2000. La saisie est désormais relue et **retentée jusqu'à trois fois en
+  re-résolvant le champ** : le nœud obtenu avant le postback appartient à un DOM remplacé, un
+  nouvel essai sur le même locator ne servirait à rien. Saisir n'écrivant rien tant que rien
+  n'est validé, ces tentatives ne risquent aucune mutation.
+- Nouveau code d'action `comment_not_retained`, distinct de `comment_too_long` : le premier se
+  rejoue tel quel, le second demande de raccourcir. Les confondre donnait une consigne inapplicable.
+
 - **Un pilote Playwright mort suspendait le worker indéfiniment.** Les délais d'attente de
   Playwright sont appliqués *par son pilote Node* : quand celui-ci meurt, plus rien ne les
   applique et l'appel Python reste suspendu sans exception ni timeout. Constaté en recette — six
