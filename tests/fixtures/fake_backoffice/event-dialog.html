@@ -28,6 +28,18 @@
     <input type="submit" id="ctl00_ButtonContent_ctl00_ctl02_btValidate" class="valid-button" value="Valider">
   </form>
 <script>
+// Postback ASP.NET en vol : le formulaire s'adapte au type choisi et recharge l'iframe. S'il
+// atterrit APRES la saisie, le champ est vide au moment de la relecture — constate en recette,
+// 0 caractere relu pour un commentaire de 49. On le reproduit de facon deterministe : la premiere
+// saisie est effacee dans le gestionnaire d'`input`, les suivantes tiennent.
+if (new URLSearchParams(location.search).has('wipefirst')) {
+  var comment = document.getElementById('ctl00_EventEdit_fldTextComment_fieldContent_EventComment');
+  var wiped = false;
+  comment.addEventListener('input', function () {
+    if (!wiped) { wiped = true; comment.value = ''; }
+  });
+}
+
 document.getElementById('ctl00_ButtonContent_ctl00_ctl02_btValidate').addEventListener('click', function (e) {
   e.preventDefault();
   var sel = document.getElementById('ctl00_fieldContent_ddlJobApplicationChildEventType');

@@ -794,10 +794,11 @@ class TalentsoftBot:
         try:
             chosen = dialog.fill(frame, event_type, comment, event_date)
         except ValueError as error:
-            # Commentaire tronqué par le champ : on annule avant toute écriture.
+            # Saisie non retenue par le champ : on annule avant toute écriture. Le code distingue
+            # un texte tronqué, qu'il faut raccourcir, d'un champ vidé, qui se rejoue tel quel.
             logger.error(f"event_comment_rejected reason={error}")
             dialog.cancel()
-            result["error"] = "comment_too_long"
+            result["error"] = getattr(error, "code", "comment_too_long")
             return result
 
         result["event_type"] = chosen or event_type
