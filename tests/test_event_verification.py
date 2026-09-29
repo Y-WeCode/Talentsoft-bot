@@ -292,6 +292,22 @@ def test_a_dead_browser_is_fatal_whatever_its_message():
     assert is_fatal_playwright_error(TargetClosedError("libelle inattendu")) is True
 
 
+def test_a_crashed_renderer_is_fatal_even_as_a_plain_error():
+    """Playwright signale un moteur de rendu mort de deux facons, et une seule etait couverte.
+
+    `TargetClosedError("Page crashed")` passait par le type ; `Error("Page crashed")`, levee par
+    toute operation qui attend un evenement, passait pour une erreur ordinaire. Le job finissait
+    alors `completed` avec `event_failed`, la session survivait avec une page morte, et le rejeu
+    du worker — conditionne a `browser_fatal` — ne partait jamais.
+    """
+    from playwright.sync_api import Error as PlaywrightError
+
+    is_fatal_playwright_error = _scraper().is_fatal_playwright_error
+
+    assert is_fatal_playwright_error(PlaywrightError("Page crashed")) is True
+    assert is_fatal_playwright_error(PlaywrightError("Page.click: Page crashed")) is True
+
+
 def test_an_ordinary_playwright_error_stays_non_fatal():
     from playwright.sync_api import Error as PlaywrightError
 

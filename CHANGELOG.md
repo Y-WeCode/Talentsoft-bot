@@ -12,6 +12,12 @@
   l'hypothèse mémoire ne collait pas. Le bot lève désormais cette option, mais **seulement quand
   `/dev/shm` fait au moins 512 Mo** : Docker le plafonne à 64 Mo par défaut, et lever la consigne
   sans vérifier remplacerait une contrainte par une pire.
+- **Un moteur de rendu mort n'était reconnu que dans un cas sur deux.** Playwright le signale soit
+  par `TargetClosedError("Page crashed")`, reconnue par son type depuis 0.4.0, soit par un simple
+  `Error("Page crashed")` — levé par toute opération qui attend un événement, donc la majorité.
+  Ce second cas passait pour une erreur ordinaire : le job finissait `completed` avec
+  `event_failed`, la session survivait avec une page morte, et le rejeu ci-dessous ne partait
+  jamais. C'est le trou que l'analyse de l'équipe Hippolyte a mis en évidence.
 - **Un navigateur mort avant toute écriture est désormais rejoué par le worker**, une seule fois,
   sur une session neuve. Le worker savait déjà prouver qu'aucun clic de validation n'était parti —
   c'est ce qui l'autorise à libérer la clé d'idempotence — mais laissait l'appelant reprendre à la

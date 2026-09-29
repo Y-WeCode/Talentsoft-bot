@@ -93,6 +93,13 @@ _FATAL_FRAGMENTS = (
     "target page, context or browser has been closed",
     "protocol error",
     "browser process exited",
+    # Playwright signale un moteur de rendu mort de DEUX façons, et une seule était couverte :
+    # `TargetClosedError("Page crashed")` (coreBundle.js:21862), reconnue par son type, mais aussi
+    # `new Error("Page crashed")` (coreBundle.js:61277), levée par toutes les opérations qui
+    # attendent un événement. Celle-ci passait pour une erreur ordinaire : le job finissait
+    # `completed` avec `event_failed`, la session survivait avec une page morte, et le rejeu du
+    # worker — qui ne se déclenche que sur `browser_fatal` — ne partait jamais.
+    "page crashed",
 )
 
 
