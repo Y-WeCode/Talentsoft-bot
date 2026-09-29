@@ -156,6 +156,40 @@ class TalentsoftBot:
 
     # --- Cycle de vie ------------------------------------------------------------------
 
+    # En dessous, rendre `/dev/shm` à Chromium remplacerait une contrainte par une pire : Docker
+    # le plafonne à 64 Mo par défaut, contre les 512 Mo de notre `/tmp`.
+    _MIN_SHM_BYTES = 512 * 1024 * 1024
+
+    @staticmethod
+    def _dev_shm_bytes() -> int:
+        """Taille de `/dev/shm`, ou 0 si le système n'en expose pas (Windows, macOS)."""
+        try:
+            stats = os.statvfs("/dev/shm")
+        except (OSError, AttributeError, ValueError):
+            return 0
+        return stats.f_blocks * stats.f_frsize
+
+    @classmethod
+    def _shm_launch_overrides(cls) -> dict:
+        """Rend `/dev/shm` à Chromium quand il y est au large.
+
+        Playwright passe `--disable-dev-shm-usage` par défaut : Chromium écrit alors ses segments
+        de mémoire partagée dans `/tmp`, que notre compose plafonne à 512 Mo — pendant que les
+        2 Go de `/dev/shm`, provisionnés pour lui, restent à **zéro octet utilisé** (mesuré en
+        recette). Une saturation de `/tmp` tue le moteur de rendu sans tué-par-OOM ni ligne dans
+        `dmesg` : la signature exacte des plantages observés, là où l'hypothèse mémoire ne
+        collait pas.
+
+        Le seuil n'est pas une précaution de principe : Docker plafonne `/dev/shm` à 64 Mo par
+        défaut, et lever la consigne sur un hôte ainsi configuré remplacerait une contrainte par
+        une pire. Sous le seuil, le réglage par défaut de Playwright reste le bon.
+        """
+        shm_bytes = cls._dev_shm_bytes()
+        if shm_bytes < cls._MIN_SHM_BYTES:
+            return {}
+        logger.info(f"browser_launch dev_shm_mb={shm_bytes // (1024 * 1024)} dev_shm_used=true")
+        return {"ignore_default_args": ["--disable-dev-shm-usage"]}
+
     def _launch(self) -> None:
         os.makedirs(config.STATE_DIR, exist_ok=True)
         self._pw = sync_playwright().start()
@@ -163,6 +197,8 @@ class TalentsoftBot:
         executable = config.browser_executable_path()
         if executable:
             launch_kwargs["executable_path"] = executable
+
+        launch_kwargs.update(self._shm_launch_overrides())
         self.browser = self._pw.chromium.launch(**launch_kwargs)
 
         # Viewport fixé explicitement : l'en-tête du Back Office est responsive et REPLIE la

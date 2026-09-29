@@ -298,3 +298,32 @@ def test_an_ordinary_playwright_error_stays_non_fatal():
     is_fatal_playwright_error = _scraper().is_fatal_playwright_error
 
     assert is_fatal_playwright_error(PlaywrightError("locator introuvable")) is False
+
+
+# --- Ou Chromium place sa memoire partagee ---------------------------------------------------
+
+
+def test_a_roomy_dev_shm_is_given_back_to_chromium(monkeypatch):
+    """Playwright passe `--disable-dev-shm-usage` : Chromium se rabat alors sur `/tmp`, plafonne
+    a 512 Mo par notre compose, pendant que les 2 Go de `/dev/shm` restent a zero octet utilise.
+    """
+    bot_class = _scraper().TalentsoftBot
+    monkeypatch.setattr(bot_class, "_dev_shm_bytes", classmethod(lambda cls: 2 * 1024**3))
+
+    assert bot_class._shm_launch_overrides() == {"ignore_default_args": ["--disable-dev-shm-usage"]}
+
+
+def test_a_cramped_dev_shm_is_left_alone(monkeypatch):
+    """Docker plafonne `/dev/shm` a 64 Mo par defaut : y renvoyer le moteur de rendu remplacerait
+    une contrainte par une pire. Sous le seuil, le reglage de Playwright reste le bon."""
+    bot_class = _scraper().TalentsoftBot
+    monkeypatch.setattr(bot_class, "_dev_shm_bytes", classmethod(lambda cls: 64 * 1024**2))
+
+    assert bot_class._shm_launch_overrides() == {}
+
+
+def test_a_system_without_dev_shm_is_left_alone():
+    """Windows et macOS n'exposent pas `/dev/shm` : la mesure doit rendre 0, pas lever."""
+    bot_class = _scraper().TalentsoftBot
+
+    assert bot_class._dev_shm_bytes() >= 0
