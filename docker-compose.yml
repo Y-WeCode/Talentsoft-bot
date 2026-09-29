@@ -44,11 +44,14 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    # Chromium plus Python, sur une session qui vit desormais deux heures d'affilee. A 2 Go, le
-    # noyau tuait le renderer en cours de job — constate deux fois le 24/09, « Page crashed » puis
-    # une assertion du pilote. Une limite n'est pas une reservation : la lever ne coute rien tant
-    # qu'elle n'est pas atteinte. Le plafond qui compte est celui du service qui possede le
-    # navigateur, lequel depend de TS_ASYNC_JOBS_ENABLED : on leve donc les deux.
+    # 2 Go de memoire partagee POUR LE RENDERER, et le bot leve alors le « --disable-dev-shm-usage »
+    # que Playwright passe par defaut (scraper._shm_launch_overrides). Sans cette levee, Chromium
+    # ecrit ses segments dans /tmp ci-dessus, plafonne a 512 Mo, pendant que ces 2 Go restent a
+    # zero octet utilise — mesure en recette. Ne pas baisser cette valeur sous 512 Mo sans lire
+    # le commentaire de `_shm_launch_overrides` : le bot se rabattrait silencieusement sur /tmp.
+    #
+    # La memoire, elle, n'etait PAS la cause des plantages du 24/09 : dmesg vide, OOMKilled=false,
+    # Restarts=0 avec 6 Go appliques. La limite reste haute par prudence, pas par diagnostic.
     shm_size: "2gb"
     mem_limit: 6g
     cpus: 2.0
@@ -93,11 +96,14 @@ services:
       timeout: 10s
       start_period: 60s
       retries: 3
-    # Chromium plus Python, sur une session qui vit desormais deux heures d'affilee. A 2 Go, le
-    # noyau tuait le renderer en cours de job — constate deux fois le 24/09, « Page crashed » puis
-    # une assertion du pilote. Une limite n'est pas une reservation : la lever ne coute rien tant
-    # qu'elle n'est pas atteinte. Le plafond qui compte est celui du service qui possede le
-    # navigateur, lequel depend de TS_ASYNC_JOBS_ENABLED : on leve donc les deux.
+    # 2 Go de memoire partagee POUR LE RENDERER, et le bot leve alors le « --disable-dev-shm-usage »
+    # que Playwright passe par defaut (scraper._shm_launch_overrides). Sans cette levee, Chromium
+    # ecrit ses segments dans /tmp ci-dessus, plafonne a 512 Mo, pendant que ces 2 Go restent a
+    # zero octet utilise — mesure en recette. Ne pas baisser cette valeur sous 512 Mo sans lire
+    # le commentaire de `_shm_launch_overrides` : le bot se rabattrait silencieusement sur /tmp.
+    #
+    # La memoire, elle, n'etait PAS la cause des plantages du 24/09 : dmesg vide, OOMKilled=false,
+    # Restarts=0 avec 6 Go appliques. La limite reste haute par prudence, pas par diagnostic.
     shm_size: "2gb"
     mem_limit: 6g
     cpus: 2.0

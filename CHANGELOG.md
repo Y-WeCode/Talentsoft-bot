@@ -1,5 +1,37 @@
 # Changelog
 
+## Non publié
+
+### Fiabilité
+
+- **Chromium plaçait sa mémoire partagée dans un `/tmp` de 512 Mo.** Playwright passe
+  `--disable-dev-shm-usage` dans ses options par défaut : le moteur de rendu se rabattait donc sur
+  le `tmpfs` de 512 Mo du conteneur, pendant que les 2 Go de `/dev/shm` provisionnés pour lui
+  restaient à **zéro octet utilisé** (mesuré en recette). Une saturation de `/tmp` tue le moteur de
+  rendu sans tué-par-OOM ni ligne dans `dmesg` — la signature exacte des plantages observés, là où
+  l'hypothèse mémoire ne collait pas. Le bot lève désormais cette option, mais **seulement quand
+  `/dev/shm` fait au moins 512 Mo** : Docker le plafonne à 64 Mo par défaut, et lever la consigne
+  sans vérifier remplacerait une contrainte par une pire.
+- **Un moteur de rendu mort n'était reconnu que dans un cas sur deux.** Playwright le signale soit
+  par `TargetClosedError("Page crashed")`, reconnue par son type depuis 0.4.0, soit par un simple
+  `Error("Page crashed")` — levé par toute opération qui attend un événement, donc la majorité.
+  Ce second cas passait pour une erreur ordinaire : le job finissait `completed` avec
+  `event_failed`, la session survivait avec une page morte, et le rejeu ci-dessous ne partait
+  jamais. C'est le trou que l'analyse de l'équipe Hippolyte a mis en évidence.
+- **Un navigateur mort avant toute écriture est désormais rejoué par le worker**, une seule fois,
+  sur une session neuve. Le worker savait déjà prouver qu'aucun clic de validation n'était parti —
+  c'est ce qui l'autorise à libérer la clé d'idempotence — mais laissait l'appelant reprendre à la
+  main un job qu'aucun doublon ne menaçait. `mutation_started` vrai interdit toujours le rejeu, et
+  seul `browser_fatal` est concerné : un `job_timeout` rejoué doublerait un budget déjà dépassé, et
+  une session dégradée ne doit jamais être retentée. Le compteur du chien de garde repart au rejeu,
+  sans quoi un second essai de durée normale ferait tuer le processus en plein travail.
+
+### Documentation
+
+- Le commentaire de `shm_size` dans `docker-compose.yml` attribuait les plantages du 24/09 à la
+  mémoire. C'était une hypothèse, démentie depuis : `dmesg` vide, `OOMKilled=false`, `Restarts=0`
+  avec 6 Go appliqués. Corrigé, et relié au réglage de lancement qu'il conditionne.
+
 ## 0.4.0 (2026-09-24)
 
 Dépôt de documents avec **catégories de repli**, et correction du rejeu après un échec rejouable. Contrat

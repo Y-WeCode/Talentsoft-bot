@@ -119,7 +119,8 @@ L'API du bot accepte les deux (`event_type` peut être un libellé ou un code).
 
 ## Aucun type « Commentaire »
 
-`.env.example` propose `TS_DEFAULT_EVENT_TYPE=Commentaire` : **ce type n'existe pas sur ce tenant**.
+`TS_DEFAULT_EVENT_TYPE` est **vide** dans `.env.example`, et doit le rester tant que le client n'a pas
+tranché : la valeur `Commentaire` qui y figurait autrefois **n'existe pas sur ce tenant**.
 
 Un type par défaut doit être choisi avec le client. Pistes neutres, qui ne déclenchent pas de courrier
 candidat ni de changement de statut fort : `A traiter` (1329), `Candidature à l'étude` (1735),

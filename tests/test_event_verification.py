@@ -292,9 +292,54 @@ def test_a_dead_browser_is_fatal_whatever_its_message():
     assert is_fatal_playwright_error(TargetClosedError("libelle inattendu")) is True
 
 
+def test_a_crashed_renderer_is_fatal_even_as_a_plain_error():
+    """Playwright signale un moteur de rendu mort de deux facons, et une seule etait couverte.
+
+    `TargetClosedError("Page crashed")` passait par le type ; `Error("Page crashed")`, levee par
+    toute operation qui attend un evenement, passait pour une erreur ordinaire. Le job finissait
+    alors `completed` avec `event_failed`, la session survivait avec une page morte, et le rejeu
+    du worker — conditionne a `browser_fatal` — ne partait jamais.
+    """
+    from playwright.sync_api import Error as PlaywrightError
+
+    is_fatal_playwright_error = _scraper().is_fatal_playwright_error
+
+    assert is_fatal_playwright_error(PlaywrightError("Page crashed")) is True
+    assert is_fatal_playwright_error(PlaywrightError("Page.click: Page crashed")) is True
+
+
 def test_an_ordinary_playwright_error_stays_non_fatal():
     from playwright.sync_api import Error as PlaywrightError
 
     is_fatal_playwright_error = _scraper().is_fatal_playwright_error
 
     assert is_fatal_playwright_error(PlaywrightError("locator introuvable")) is False
+
+
+# --- Ou Chromium place sa memoire partagee ---------------------------------------------------
+
+
+def test_a_roomy_dev_shm_is_given_back_to_chromium(monkeypatch):
+    """Playwright passe `--disable-dev-shm-usage` : Chromium se rabat alors sur `/tmp`, plafonne
+    a 512 Mo par notre compose, pendant que les 2 Go de `/dev/shm` restent a zero octet utilise.
+    """
+    bot_class = _scraper().TalentsoftBot
+    monkeypatch.setattr(bot_class, "_dev_shm_bytes", classmethod(lambda cls: 2 * 1024**3))
+
+    assert bot_class._shm_launch_overrides() == {"ignore_default_args": ["--disable-dev-shm-usage"]}
+
+
+def test_a_cramped_dev_shm_is_left_alone(monkeypatch):
+    """Docker plafonne `/dev/shm` a 64 Mo par defaut : y renvoyer le moteur de rendu remplacerait
+    une contrainte par une pire. Sous le seuil, le reglage de Playwright reste le bon."""
+    bot_class = _scraper().TalentsoftBot
+    monkeypatch.setattr(bot_class, "_dev_shm_bytes", classmethod(lambda cls: 64 * 1024**2))
+
+    assert bot_class._shm_launch_overrides() == {}
+
+
+def test_a_system_without_dev_shm_is_left_alone():
+    """Windows et macOS n'exposent pas `/dev/shm` : la mesure doit rendre 0, pas lever."""
+    bot_class = _scraper().TalentsoftBot
+
+    assert bot_class._dev_shm_bytes() >= 0

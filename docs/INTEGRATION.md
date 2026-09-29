@@ -402,12 +402,22 @@ GET /jobs/{job_id}
 | `session_degraded` | `503` | après intervention |
 | `browser_busy` | `503` | après `Retry-After` |
 | `session_bootstrap_failed` | `500` | oui : aucune écriture n'a eu lieu |
-| `browser_fatal`, `job_timeout`, `session_expired`, `internal_error` | `500` | **prudence**, vérifier d'abord |
+| `browser_fatal`, `job_timeout`, `session_expired`, `internal_error` | `500` | **lire `mutation_started`** (ci-dessous) |
 | `mutation_started_no_rejeu` | `500` | non |
 
 `mutation_started` dit qu'une écriture a été **engagée** : c'est ce drapeau qui interdit le rejeu. Il ne tombe
 qu'à la première écriture réelle — un échec au login, à la recherche ou à la sélection laisse donc le job
 pleinement rejouable.
+
+**C'est le drapeau qui décide, pas le code.** Sur les quatre codes ci-dessus, `mutation_started: false`
+garantit qu'aucun clic de validation n'est parti : le rejeu ne peut pas produire de doublon, et se fait sous
+la **même** clé d'idempotence, que le bot a libérée. Un intégrateur qui ne lirait que la colonne « Rejeu »
+conclurait l'inverse — d'où cette précision. Plafonnez tout de même les tentatives : un code permanent mal
+classé ne doit pas boucler.
+
+Un `browser_fatal` est en outre **déjà rejoué une fois par le worker**, sur une session neuve, quand aucune
+écriture n'a eu lieu. Celui qui vous parvient a donc échoué deux fois de suite : votre propre rejeu reste
+légitime, mais il s'agit d'une seconde ligne de défense, pas de la première.
 
 Un job dont `mutation_started` est déjà vrai n'est **jamais rejoué** par le worker : il passe en `failed`
 avec `error: "mutation_started_no_rejeu"`. C'est volontaire — mieux vaut un job en échec explicite qu'un
