@@ -238,6 +238,38 @@ def _fail(job: dict, code: str, detail: str) -> None:
     jobs.save_job(job)
 
 
+# Un navigateur mort est une panne d'infrastructure, pas un refus métier. Les autres codes sont
+# volontairement exclus : un `job_timeout` rejoué doublerait un budget déjà dépassé, et une session
+# dégradée ne doit jamais être retentée — c'est ce qui protège le compte Talentsoft du blocage.
+_CRASH_RETRY_CODES = (browser_runner.CODE_BROWSER_FATAL,)
+
+
+def _dispatch_with_crash_retry(job: dict, payload: dict) -> dict:
+    """Rejoue une fois un job dont le navigateur est mort sans avoir rien écrit.
+
+    `mutation_started` est la seule garantie qui compte : tant qu'il est faux, aucun clic de
+    validation n'est parti et le rejeu ne peut pas produire de doublon dans le dossier d'un
+    candidat. C'est exactement le prédicat de `_release_idempotency`, qui libère déjà la clé dans
+    ce cas — le worker savait donc prouver l'innocuité du rejeu sans en tirer parti, et laissait
+    l'appelant reprendre à la main ce qu'il pouvait reprendre seul.
+
+    Une seule tentative : deux plantages d'affilée sur le même job ne relèvent plus de l'aléa, et
+    insister masquerait la panne au lieu de la signaler. La session a déjà été invalidée par
+    `run_with_session`, le second essai repart donc d'un Chromium neuf.
+    """
+    try:
+        return _dispatch(job, payload)
+    except browser_runner.BrowserJobError as error:
+        if error.code not in _CRASH_RETRY_CODES or job.get("mutation_started"):
+            raise
+        logger.warning(f"job_id={job['id']} crash_retry=1 code={error.code}")
+        # Le chien de garde mesure l'âge du job, pas celui de la tentative : sans remise à zéro,
+        # un rejeu de durée normale franchirait `job_timeout + 120` et ferait tuer le processus
+        # en plein travail. La borne reste finie, puisqu'il n'y a qu'un seul rejeu.
+        _set_current_job(job["id"])
+        return _dispatch(job, payload)
+
+
 def _process_job(job: dict) -> None:
     job_id = job["id"]
     payload = job.get("payload") or {}
@@ -254,7 +286,7 @@ def _process_job(job: dict) -> None:
     jobs.save_job(job)
 
     try:
-        job["result"] = _dispatch(job, payload)
+        job["result"] = _dispatch_with_crash_retry(job, payload)
         job["status"] = "completed"
         if is_mutation and job.get("idempotency_key"):
             _remember_or_release(job)

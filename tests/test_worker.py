@@ -136,6 +136,114 @@ def test_browser_fatal_never_leaks_the_playwright_message(ts):
     assert "token=abc" not in str(done)
 
 
+# --- Rejeu d'un navigateur mort --------------------------------------------------------------
+
+
+def _crashing_bot(crashes: int, attempts: list):
+    """Un bot qui meurt `crashes` fois avant toute écriture, puis travaille normalement."""
+    from app.scraper import BrowserFatalError
+
+    class CrashesThenWorks(FakeBot):
+        def update_application(self, **kwargs):
+            attempts.append(1)
+            if len(attempts) <= crashes:
+                raise BrowserFatalError("Page crashed")
+            return super().update_application(**kwargs)
+
+    return CrashesThenWorks()
+
+
+def test_a_dead_browser_before_any_write_is_replayed_by_the_worker(ts):
+    """Le moteur de rendu meurt avant le moindre clic : c'est une panne, pas un refus métier.
+
+    Le worker sait déjà prouver qu'aucune écriture n'a eu lieu — c'est ce qui l'autorise à libérer
+    la clé d'idempotence. Il doit s'en servir pour reprendre seul, au lieu de laisser l'appelant
+    reprendre à la main un job qu'aucun doublon ne menace.
+    """
+    attempts = []
+    ts.install(_crashing_bot(1, attempts))
+
+    done = pump_worker(ts.push(key="k-crash")["id"])
+
+    assert len(attempts) == 2, "le job doit être rejoué une fois"
+    assert done["status"] == "completed"
+    assert done["result"]["success"] is True
+
+
+def test_a_dead_browser_after_a_write_is_never_replayed(ts):
+    """Le seul garde-fou qui compte : un clic déjà parti interdit le rejeu, doublon possible."""
+    from app.scraper import BrowserFatalError
+
+    attempts = []
+
+    class DiesAfterWriting(FakeBot):
+        def update_application(self, **kwargs):
+            attempts.append(1)
+            kwargs["on_mutation_started"]()
+            raise BrowserFatalError("Page crashed")
+
+    ts.install(DiesAfterWriting())
+    done = pump_worker(ts.push(key="k-ecrit")["id"])
+
+    assert len(attempts) == 1, "rejouer par-dessus une écriture engagée créerait un doublon"
+    assert done["status"] == "failed"
+    assert done["mutation_started"] is True
+
+
+def test_only_a_dead_browser_is_replayed(ts):
+    """Un candidat introuvable ne devient pas trouvable au second essai : rejouer n'apporte rien."""
+    from app.ts_pages import CandidateNotFound
+
+    attempts = []
+
+    class NeverFindsAnyone(FakeBot):
+        def update_application(self, **kwargs):
+            attempts.append(1)
+            raise CandidateNotFound("aucun candidat")
+
+    ts.install(NeverFindsAnyone())
+    done = pump_worker(ts.push()["id"])
+
+    assert len(attempts) == 1
+    assert done["error_code"] == "candidate_not_found"
+
+
+def test_two_crashes_in_a_row_give_up_instead_of_insisting(ts):
+    """Deux plantages d'affilée ne relèvent plus de l'aléa : insister masquerait la panne."""
+    attempts = []
+    ts.install(_crashing_bot(2, attempts))
+
+    done = pump_worker(ts.push(key="k-double")["id"])
+
+    assert len(attempts) == 2
+    assert done["status"] == "failed"
+    assert done["error_code"] == "browser_fatal"
+    # Toujours aucune écriture : la clé reste rejouable par l'appelant.
+    assert done.get("mutation_started") is not True
+    assert ts.idempotency.reserve("k-double")[0] == "reserved"
+
+
+def test_a_replay_restarts_the_watchdog_clock(ts):
+    """Le chien de garde mesure l'âge du job, pas celui de la tentative.
+
+    Sans remise à zéro, un rejeu de durée normale franchirait `job_timeout + 120` et ferait tuer
+    le processus en plein travail — le correctif se retournerait contre lui-même.
+    """
+    worker_module = _worker()
+    marked = []
+    original = worker_module._set_current_job
+    worker_module._set_current_job = lambda job_id: (marked.append(job_id), original(job_id))[1]
+    try:
+        attempts = []
+        ts.install(_crashing_bot(1, attempts))
+        job = ts.push(key="k-horloge")
+        pump_worker(job["id"])
+    finally:
+        worker_module._set_current_job = original
+
+    assert marked.count(job["id"]) == 2, "l'horloge doit repartir au rejeu"
+
+
 def test_third_party_exception_keeps_only_its_type(ts):
     class OddBot(FakeBot):
         def update_application(self, **kwargs):

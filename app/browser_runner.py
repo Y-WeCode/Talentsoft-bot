@@ -67,7 +67,9 @@ def run_with_session(work: Callable[[object], T], lock_timeout_seconds: float = 
     """Exécute work(bot) sous le mutex navigateur, dans le processus propriétaire.
 
     - bootstrap : un retry ;
-    - navigateur perdu en cours de job : invalidation, aucun rejeu ;
+    - navigateur perdu en cours de job : invalidation, et l'échec remonte tel quel. Le rejeu se
+      décide plus haut, dans `worker._dispatch_with_crash_retry` : lui seul sait si une écriture
+      a déjà été engagée, et donc si rejouer risquerait un doublon ;
     - session dégradée : échec immédiat, sans nouvelle tentative de login (protège le compte).
     """
     if not browser_lock.try_acquire(lock_timeout_seconds):
