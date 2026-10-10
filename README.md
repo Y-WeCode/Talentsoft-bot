@@ -52,6 +52,9 @@ Le worker devient alors le **seul** processus à piloter un navigateur, et l'api
 puis attend. `TS_ASYNC_JOBS_ENABLED=true` doit être posé pour **les deux** services : sans cela l'api
 ouvre son propre Chromium en plus de celui du worker (elle journalise `config_suspecte` au démarrage).
 
+Guide complet (prérequis, dossiers, reverse proxy, mises à jour, dépannage) :
+**[docs/DEPLOIEMENT-DOCKER.md](docs/DEPLOIEMENT-DOCKER.md)**.
+
 ## Contrat HTTP
 
 > **Pour écrire le client côté Hippolyte.ai, lire [docs/INTEGRATION.md](docs/INTEGRATION.md)** : guide
