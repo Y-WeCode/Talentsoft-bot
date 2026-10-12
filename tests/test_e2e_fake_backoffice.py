@@ -224,6 +224,38 @@ def test_opens_application_by_email_and_offer(bot):
     assert "25152" in label
 
 
+def test_selftest_counts_offer_links_before_the_selection_removes_them(bot):
+    """Le postback de selection ne laisse plus de lien de candidature dans le Back Office reel.
+
+    Compter ce selecteur apres la selection faisait repondre 503 a /selftest sur un Back Office
+    sain : la supervision aurait ete rouge en permanence.
+    """
+    from app.ts_selectors import APPLICATION_OFFER_LINK
+
+    bot.page.add_init_script(
+        """
+        document.addEventListener('click', function (event) {
+          if (event.target.closest && event.target.closest('a[id$="lnkOfferLabel"]')) {
+            setTimeout(function () {
+              document.querySelectorAll('a[id$="lnkOfferLabel"]').forEach(function (a) {
+                var span = document.createElement('span');
+                span.textContent = a.textContent;
+                a.replaceWith(span);
+              });
+            }, 150);
+          }
+        }, true);
+        """
+    )
+    report = bot.selftest("candidat@example.com", "25152")
+
+    assert report.get("application_opened") is True, report
+    bot.page.wait_for_timeout(500)
+    assert bot.page.locator(APPLICATION_OFFER_LINK[0]).count() == 0, "la simulation ne retire pas les liens"
+    assert report["selectors"]["application_offer_link"]["ok"] is True
+    assert report["selectors"]["application_offer_link"]["count"] >= 1
+
+
 def test_refuses_offer_the_candidate_did_not_apply_to(bot):
     from app.ts_pages import ApplicationNotOnOffer
 
