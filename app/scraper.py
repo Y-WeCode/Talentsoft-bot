@@ -705,11 +705,16 @@ class TalentsoftBot:
 
     # --- Ouverture d'une candidature ----------------------------------------------------
 
-    def open_application(self, candidate_email: str, offer_id: str) -> tuple[ApplicationPage, str]:
+    def open_application(
+        self, candidate_email: str, offer_id: str, before_select: Callable[[], None] | None = None
+    ) -> tuple[ApplicationPage, str]:
         """Recherche le candidat par email, ouvre sa fiche, sélectionne la candidature de l'offre.
 
         Le Back Office n'accepte pas les identifiants de l'API Recruiting Customer : c'est le
         seul chemin praticable (docs/DISCOVERY.md). Retourne (page, libellé de la candidature).
+
+        `before_select` s'exécute sur l'historique encore replié, juste avant le clic : c'est
+        le seul moment où les liens de candidature existent (le postback de sélection les retire).
         """
         for attempt in (1, 2):
             self._goto(self.base_url + sel.LOGIN_PATH)
@@ -748,6 +753,8 @@ class TalentsoftBot:
             raise ApplicationNotFound(f"candidat introuvable pour l'email fourni (offre {offer_id})")
         app_page.wait_ready()
         app_page.open_events_tab()
+        if before_select:
+            before_select()
         label = app_page.select_application_by_offer(offer_id)
         logger.info(f"application_opened offer_id={offer_id}")
         return app_page, label
@@ -1232,15 +1239,27 @@ class TalentsoftBot:
 
         self.new_job()
         report: dict = {"authenticated": self.is_authenticated(), "selectors": {}}
+        # Les liens de candidature n'existent que AVANT la sélection : le postback re-rend
+        # l'historique sans eux. Les compter après ferait échouer le selftest sur un Back Office
+        # sain, et la supervision resterait en 503 en permanence.
+        offer_links_before_select: list[int] = []
         if candidate_email and offer_id:
             try:
-                self.open_application(candidate_email, offer_id)
+                self.open_application(
+                    candidate_email,
+                    offer_id,
+                    before_select=lambda: offer_links_before_select.append(
+                        count_matches(self.page, sel.APPLICATION_OFFER_LINK)
+                    ),
+                )
                 report["application_opened"] = True
             except (ApplicationNotFound, CandidateNotFound, AmbiguousCandidate, ApplicationNotOnOffer) as error:
                 report["application_opened"] = False
                 report["application_error"] = type(error).__name__
         for name, candidates in sel.CRITICAL_SELECTORS.items():
             count = count_matches(self.page, candidates)
+            if name == "application_offer_link" and offer_links_before_select:
+                count = offer_links_before_select[0]
             report["selectors"][name] = {"ok": count > 0, "count": count}
         report["ok"] = report["authenticated"] and all(v["ok"] for v in report["selectors"].values())
         return report
